@@ -15,9 +15,7 @@
 
 ```bash
 pnpm install
-pnpm test
-pnpm build
-pnpm package:extension
+pnpm release:preflight
 ```
 
 预期结果：
@@ -28,6 +26,13 @@ pnpm package:extension
 - `package.json` 中的 package/sdk 入口仍与实际发布源码布局一致
 - 生成后的 userscript 元数据使用当前 `package.json` 版本号
 - `release/` 下已重新生成 Chrome 插件 zip、sha256 文件和 `latest-extension.json`，用于 GitHub Release 和手动安装备用入口
+- allenk V2 对比报告输出 `current-gap-known`
+- `pnpm release:preflight` 会依次运行 `pnpm test`、`pnpm build`、`pnpm package:extension`、`pnpm release:quality-gate` 和 `pnpm release:goal-audit -- --fail-on-incomplete`
+- `pnpm release:quality-gate` 会先运行 `pnpm compare:allenk-v2 -- --fail-on-incomplete`，再运行 `pnpm release:readiness -- --fail-on-not-ready`
+- `pnpm release:goal-audit` 对当前 scoped RC 目标输出 `goal achieved: yes`
+- 在视频 gate promoted 之前，继续阻断更宽泛的视频质量声明
+- release readiness 在发布 scoped 图片 RC 前输出 `rc-current-image-defaults-with-scoped-claims`
+- 发布说明以 `Release Claim Matrix` 为边界：只描述 `allowed`、`allowed-scoped` 或 `allowed-safety-only` 行；`review-only`、`experiment-only` 和 `forbidden` 行不能写成公开能力声明
 - `dist/extension` 下的未打包插件是本地测试版；正式发布 manifest 只写入 `release/` 里的 zip
 
 ## 版本元数据

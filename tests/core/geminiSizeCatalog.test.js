@@ -178,6 +178,7 @@ test('resolveOfficialGeminiSearchConfigs should prefer current 48px exact offici
     assert.deepEqual(configs, [
         { logoSize: 48, marginRight: 32, marginBottom: 32 },
         { logoSize: 48, marginRight: 96, marginBottom: 96 },
+        { logoSize: 36, marginRight: 96, marginBottom: 96, alphaVariant: 'v2' },
         { logoSize: 96, marginRight: 64, marginBottom: 64 },
     ]);
 });
@@ -206,12 +207,29 @@ test('resolveOfficialGeminiSearchConfigEntries should expose explicit catalog fa
                 evidenceGate: 'required'
             },
             {
+                config: { logoSize: 36, marginRight: 96, marginBottom: 96, alphaVariant: 'v2' },
+                family: 'gemini-v2-small',
+                sourcePriority: 2,
+                evidenceGate: 'medium'
+            },
+            {
                 config: { logoSize: 96, marginRight: 64, marginBottom: 64 },
                 family: 'exact-official-legacy',
-                sourcePriority: 2,
+                sourcePriority: 3,
                 evidenceGate: 'required'
             }
         ]
+    );
+});
+
+test('resolveOfficialGeminiSearchConfigs should expose aspect-aware V2 36px small profile candidates', () => {
+    assert.deepEqual(
+        resolveOfficialGeminiSearchConfigs(1024, 1024).find((config) => config.alphaVariant === 'v2'),
+        { logoSize: 36, marginRight: 71, marginBottom: 71, alphaVariant: 'v2' }
+    );
+    assert.deepEqual(
+        resolveOfficialGeminiSearchConfigs(1376, 768).find((config) => config.alphaVariant === 'v2'),
+        { logoSize: 36, marginRight: 96, marginBottom: 96, alphaVariant: 'v2' }
     );
 });
 

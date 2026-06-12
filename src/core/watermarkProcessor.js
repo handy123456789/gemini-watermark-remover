@@ -5,13 +5,18 @@ import {
     warpAlphaMap
 } from './adaptiveDetector.js';
 import {
+    createAlphaGradientMask,
+    getAlphaGradientWeight
+} from './alphaGradientMask.js';
+import {
     calculateNearBlackRatio,
     scoreRegion,
     selectInitialCandidate
 } from './candidateSelector.js';
 import {
     assessAlphaBandHalo,
-    assessRemovalDiffArtifacts
+    assessRemovalDiffArtifacts,
+    assessWatermarkResidualVisibility
 } from './restorationMetrics.js';
 import { createSelectionDebugSummary } from './selectionDebug.js';
 import {
@@ -45,6 +50,49 @@ const STANDARD_ALPHA_PRIORITY_GAINS = ALPHA_PARAMETER_GROUPS
     .filter((group) => group.standardPriority === true)
     .map((group) => group.alphaGain);
 const PREVIEW_EDGE_CLEANUP_MAX_SIZE = 40;
+const KNOWN_48_EDGE_CLEANUP_MIN_SIZE = 40;
+const KNOWN_48_EDGE_CLEANUP_MAX_SIZE = 56;
+const KNOWN_48_EDGE_CLEANUP_MIN_GRADIENT = 0.22;
+const KNOWN_48_EDGE_CLEANUP_MAX_ABS_SPATIAL = 0.55;
+const KNOWN_48_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT = 0.015;
+const KNOWN_48_EDGE_CLEANUP_MAX_SPATIAL_DRIFT = 0.06;
+const V2_SMALL_EDGE_CLEANUP_SIZE = 36;
+const V2_SMALL_EDGE_CLEANUP_SIZE_TOLERANCE = 2;
+const V2_SMALL_EDGE_CLEANUP_MIN_GRADIENT = 0.22;
+const V2_SMALL_EDGE_CLEANUP_MAX_ABS_SPATIAL = 0.08;
+const V2_SMALL_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT = 0.025;
+const V2_SMALL_EDGE_CLEANUP_MAX_SPATIAL_DRIFT = 0.035;
+const KNOWN_48_FLAT_FILL_MIN_GRADIENT = 0.28;
+const KNOWN_48_FLAT_FILL_MAX_BACKGROUND_STD = 6;
+const KNOWN_48_FLAT_FILL_MIN_GRADIENT_IMPROVEMENT = 0.045;
+const KNOWN_48_FLAT_FILL_SECOND_PASS_MIN_GRADIENT_IMPROVEMENT = 0.025;
+const KNOWN_48_FLAT_FILL_MAX_APPLIED_PASSES = 2;
+const KNOWN_48_FLAT_FILL_MAX_SPATIAL_DRIFT = 0.12;
+const KNOWN_48_FLAT_FILL_MAX_ACCEPTED_ABS_SPATIAL = 0.38;
+const KNOWN_48_FLAT_FILL_PAD = 10;
+const KNOWN_48_FLAT_FILL_OUTSIDE_ALPHA_MAX = 0.012;
+const KNOWN_48_FLAT_FILL_PRESETS = Object.freeze([
+    { name: 'edge', minAlpha: 0.012, maxAlpha: 0.5, strength: 0.9 },
+    { name: 'wide', minAlpha: 0.008, maxAlpha: 0.99, strength: 0.92 },
+    { name: 'hard', minAlpha: 0.004, maxAlpha: 0.99, strength: 1 }
+]);
+const NEW_MARGIN_96_FLAT_FILL_MIN_GRADIENT = 0.12;
+const NEW_MARGIN_96_FLAT_FILL_MAX_BACKGROUND_STD = 7;
+const NEW_MARGIN_96_FLAT_FILL_MIN_GRADIENT_IMPROVEMENT = 0.025;
+const NEW_MARGIN_96_FLAT_FILL_MAX_SPATIAL_DRIFT = 0.08;
+const NEW_MARGIN_96_FLAT_FILL_MAX_ACCEPTED_ABS_SPATIAL = 0.22;
+const NEW_MARGIN_96_FLAT_FILL_PRESETS = Object.freeze([
+    { name: 'edge', minAlpha: 0.006, maxAlpha: 0.45, strength: 0.75 }
+]);
+const KNOWN_48_LUMA_EDGE_MIN_GRADIENT = 0.2;
+const KNOWN_48_LUMA_EDGE_MIN_GRADIENT_IMPROVEMENT = 0.02;
+const KNOWN_48_LUMA_EDGE_MAX_SPATIAL_DRIFT = 0.04;
+const KNOWN_48_LUMA_EDGE_MAX_ACCEPTED_ABS_SPATIAL = 0.38;
+const KNOWN_48_LUMA_EDGE_PRESETS = Object.freeze([
+    { name: 'soft', minAlpha: 0.012, maxAlpha: 0.7, referenceAlphaMax: 0.025, radius: 2, strength: 0.28, colorSigma: 34, maxDelta: 22 },
+    { name: 'mid', minAlpha: 0.012, maxAlpha: 0.7, referenceAlphaMax: 0.04, radius: 3, strength: 0.42, colorSigma: 34, maxDelta: 32 },
+    { name: 'wide', minAlpha: 0.012, maxAlpha: 0.7, referenceAlphaMax: 0.055, radius: 4, strength: 0.48, colorSigma: 34, maxDelta: 40 }
+]);
 const PREVIEW_EDGE_CLEANUP_SPATIAL_THRESHOLD = 0.08;
 const PREVIEW_EDGE_CLEANUP_GRADIENT_THRESHOLD = 0.1;
 const PREVIEW_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT = 0.03;
@@ -91,6 +139,10 @@ const WEAK_ALPHA_FINE_TUNE_MIN_ORIGINAL_SPATIAL = 0.45;
 const WEAK_ALPHA_FINE_TUNE_MIN_POSITIVE_RESIDUAL = 0.05;
 const WEAK_ALPHA_FINE_TUNE_MIN_ABS_SPATIAL_IMPROVEMENT = 0.04;
 const WEAK_ALPHA_FINE_TUNE_MAX_GRADIENT_INCREASE = 0.08;
+const STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_SPATIAL = 0.75;
+const STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_GRADIENT = 0.65;
+const STRONG_POSITIVE_FINE_TUNE_MIN_CURRENT_SPATIAL = 0.3;
+const STRONG_POSITIVE_FINE_TUNE_EXTRA_GAINS = Object.freeze([0.95, 1]);
 const CATALOG_ALPHA_DARK_FINE_TUNE_MIN_ORIGINAL_SPATIAL = 0.6;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MIN_ORIGINAL_GRADIENT = 0.45;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MAX_NEGATIVE_RESIDUAL = -0.12;
@@ -148,7 +200,14 @@ function normalizeMetaConfig(config) {
         return null;
     }
 
-    return { logoSize, marginRight, marginBottom };
+    return {
+        logoSize,
+        marginRight,
+        marginBottom,
+        ...(typeof config.alphaVariant === 'string' && config.alphaVariant.length > 0
+            ? { alphaVariant: config.alphaVariant }
+            : {})
+    };
 }
 
 function createWatermarkMeta({
@@ -160,6 +219,7 @@ function createWatermarkMeta({
     processedSpatialScore = null,
     processedGradientScore = null,
     suppressionGain = null,
+    residualVisibility = null,
     templateWarp = null,
     alphaGain = 1,
     passCount = 0,
@@ -188,7 +248,8 @@ function createWatermarkMeta({
             originalGradientScore,
             processedSpatialScore,
             processedGradientScore,
-            suppressionGain
+            suppressionGain,
+            residualVisibility
         },
         templateWarp: templateWarp ?? null,
         alphaGain,
@@ -470,6 +531,7 @@ function fineTuneWeakPositiveResidualAlpha({
     currentGradientScore,
     currentAlphaGain,
     originalSpatialScore,
+    originalGradientScore,
     originalNearBlackRatio
 }) {
     if (
@@ -483,10 +545,26 @@ function fineTuneWeakPositiveResidualAlpha({
     const maxAllowedNearBlackRatio = Math.min(1, originalNearBlackRatio + MAX_NEAR_BLACK_RATIO_INCREASE);
     let best = null;
     const fineStepCount = Math.round(OVER_SUBTRACTION_FINE_ALPHA_WINDOW / OVER_SUBTRACTION_FINE_ALPHA_STEP);
+    const alphaGainCandidates = new Set();
 
     for (let step = 1; step <= fineStepCount; step++) {
         const alphaGain = Number((currentAlphaGain + step * OVER_SUBTRACTION_FINE_ALPHA_STEP).toFixed(2));
         if (alphaGain >= 1) continue;
+        alphaGainCandidates.add(alphaGain);
+    }
+
+    if (
+        currentSpatialScore >= STRONG_POSITIVE_FINE_TUNE_MIN_CURRENT_SPATIAL &&
+        originalSpatialScore >= STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_SPATIAL &&
+        originalGradientScore >= STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_GRADIENT
+    ) {
+        for (const alphaGain of STRONG_POSITIVE_FINE_TUNE_EXTRA_GAINS) {
+            alphaGainCandidates.add(alphaGain);
+        }
+    }
+
+    for (const alphaGain of alphaGainCandidates) {
+        if (alphaGain <= currentAlphaGain || alphaGain > 1) continue;
 
         const candidate = cloneImageData(originalImageData);
         removeWatermark(candidate, alphaMap, position, { alphaGain });
@@ -619,13 +697,31 @@ function fineTuneDarkCatalogAlpha({
     return best;
 }
 
-function shouldRefinePreviewResidualEdge({
+function shouldRefineResidualEdge({
     source,
     position,
     baselineSpatialScore,
     baselineGradientScore,
-    baselinePositiveHalo
+    baselinePositiveHalo,
+    mode = 'preview'
 }) {
+    if (mode === 'known-48') {
+        return position?.width >= KNOWN_48_EDGE_CLEANUP_MIN_SIZE &&
+            position?.width <= KNOWN_48_EDGE_CLEANUP_MAX_SIZE &&
+            Math.abs(baselineSpatialScore) <= KNOWN_48_EDGE_CLEANUP_MAX_ABS_SPATIAL &&
+            (
+                baselineGradientScore >= KNOWN_48_EDGE_CLEANUP_MIN_GRADIENT ||
+                baselinePositiveHalo >= PREVIEW_EDGE_CLEANUP_STRONG_HALO_THRESHOLD
+            );
+    }
+
+    if (mode === 'v2-small') {
+        return position?.width >= V2_SMALL_EDGE_CLEANUP_SIZE - V2_SMALL_EDGE_CLEANUP_SIZE_TOLERANCE &&
+            position?.width <= V2_SMALL_EDGE_CLEANUP_SIZE + V2_SMALL_EDGE_CLEANUP_SIZE_TOLERANCE &&
+            Math.abs(baselineSpatialScore) <= V2_SMALL_EDGE_CLEANUP_MAX_ABS_SPATIAL &&
+            baselineGradientScore >= V2_SMALL_EDGE_CLEANUP_MIN_GRADIENT;
+    }
+
     return typeof source === 'string' &&
         source.includes('preview-anchor') &&
         position?.width >= 24 &&
@@ -646,6 +742,60 @@ function shouldUsePreviewAnchorFastCleanup(selectedTrial, position) {
         position?.width <= PREVIEW_EDGE_CLEANUP_MAX_SIZE;
 }
 
+function isKnown48AnchorConfig(config) {
+    if (!config || config.logoSize < KNOWN_48_EDGE_CLEANUP_MIN_SIZE || config.logoSize > KNOWN_48_EDGE_CLEANUP_MAX_SIZE) {
+        return false;
+    }
+
+    const marginRight = Number(config.marginRight);
+    const marginBottom = Number(config.marginBottom);
+    if (!Number.isFinite(marginRight) || !Number.isFinite(marginBottom)) return false;
+
+    const isCurrentLargeMargin = Math.abs(marginRight - 96) <= 2 && Math.abs(marginBottom - 96) <= 2;
+    const isCurrentStandardMargin = marginRight >= 28 && marginRight <= 36 && marginBottom >= 28 && marginBottom <= 36;
+    return isCurrentLargeMargin || isCurrentStandardMargin;
+}
+
+function shouldUseKnown48EdgeCleanup({ selectedTrial, position, source }) {
+    if (selectedTrial?.provenance?.previewAnchor === true) return false;
+    if (position?.width < KNOWN_48_EDGE_CLEANUP_MIN_SIZE || position?.width > KNOWN_48_EDGE_CLEANUP_MAX_SIZE) return false;
+    if (!isKnown48AnchorConfig(selectedTrial?.config)) return false;
+
+    const sourceText = String(source || '');
+    return sourceText === 'standard' ||
+        sourceText.startsWith('standard+gain') ||
+        sourceText.includes('catalog') ||
+        sourceText.includes('fixed-local');
+}
+
+function isV2SmallAnchorConfig(config) {
+    if (!config || config.logoSize !== V2_SMALL_EDGE_CLEANUP_SIZE || config.alphaVariant !== 'v2') {
+        return false;
+    }
+
+    const marginRight = Number(config.marginRight);
+    const marginBottom = Number(config.marginBottom);
+    return Number.isFinite(marginRight) &&
+        Number.isFinite(marginBottom) &&
+        marginRight >= 48 &&
+        marginBottom >= 48;
+}
+
+function shouldUseV2SmallEdgeCleanup({ selectedTrial, position, source }) {
+    if (selectedTrial?.provenance?.previewAnchor === true) return false;
+    if (
+        position?.width < V2_SMALL_EDGE_CLEANUP_SIZE - V2_SMALL_EDGE_CLEANUP_SIZE_TOLERANCE ||
+        position?.width > V2_SMALL_EDGE_CLEANUP_SIZE + V2_SMALL_EDGE_CLEANUP_SIZE_TOLERANCE
+    ) {
+        return false;
+    }
+    if (!isV2SmallAnchorConfig(selectedTrial?.config)) return false;
+    if (selectedTrial?.provenance?.catalogFamily !== 'gemini-v2-small') return false;
+
+    const sourceText = String(source || '');
+    return sourceText.includes('catalog');
+}
+
 function blendPreviewResidualEdge({
     sourceImageData,
     alphaMap,
@@ -660,10 +810,16 @@ function blendPreviewResidualEdge({
     const { width: imageWidth, height: imageHeight, data } = sourceImageData;
     const regionSize = position.width;
     const maxAlphaSafe = Math.max(maxAlpha, 1e-6);
+    const edgeMask = createAlphaGradientMask({
+        alphaMap,
+        width: regionSize,
+        height: regionSize
+    });
 
     for (let row = 0; row < regionSize; row++) {
         for (let col = 0; col < regionSize; col++) {
-            const alpha = alphaMap[row * regionSize + col];
+            const localIndex = row * regionSize + col;
+            const alpha = alphaMap[localIndex];
             if (alpha < minAlpha || alpha > maxAlpha) continue;
 
             let sumR = 0;
@@ -702,7 +858,8 @@ function blendPreviewResidualEdge({
 
             if (sumWeight <= 0) continue;
 
-            const blend = Math.max(0, Math.min(1, strength * alpha / maxAlphaSafe));
+            const edgeWeight = getAlphaGradientWeight(edgeMask, localIndex);
+            const blend = Math.max(0, Math.min(1, strength * alpha / maxAlphaSafe * edgeWeight));
             const pixelIndex = ((position.y + row) * imageWidth + (position.x + col)) * 4;
             candidate.data[pixelIndex] = Math.round(data[pixelIndex] * (1 - blend) + (sumR / sumWeight) * blend);
             candidate.data[pixelIndex + 1] = Math.round(data[pixelIndex + 1] * (1 - blend) + (sumG / sumWeight) * blend);
@@ -711,6 +868,462 @@ function blendPreviewResidualEdge({
     }
 
     return candidate;
+}
+
+function solveLinear3x3(matrix, vector) {
+    const augmented = matrix.map((row, index) => [...row, vector[index]]);
+
+    for (let column = 0; column < 3; column++) {
+        let pivot = column;
+        for (let row = column + 1; row < 3; row++) {
+            if (Math.abs(augmented[row][column]) > Math.abs(augmented[pivot][column])) {
+                pivot = row;
+            }
+        }
+
+        if (Math.abs(augmented[pivot][column]) < 1e-8) return null;
+        if (pivot !== column) {
+            [augmented[pivot], augmented[column]] = [augmented[column], augmented[pivot]];
+        }
+
+        const divisor = augmented[column][column];
+        for (let next = column; next < 4; next++) {
+            augmented[column][next] /= divisor;
+        }
+
+        for (let row = 0; row < 3; row++) {
+            if (row === column) continue;
+            const factor = augmented[row][column];
+            for (let next = column; next < 4; next++) {
+                augmented[row][next] -= factor * augmented[column][next];
+            }
+        }
+    }
+
+    return [augmented[0][3], augmented[1][3], augmented[2][3]];
+}
+
+function fitColorPlane(samples, channel) {
+    const matrix = [
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0]
+    ];
+    const vector = [0, 0, 0];
+
+    for (const sample of samples) {
+        const terms = [1, sample.x, sample.y];
+        const value = sample[channel];
+        for (let row = 0; row < 3; row++) {
+            vector[row] += terms[row] * value;
+            for (let column = 0; column < 3; column++) {
+                matrix[row][column] += terms[row] * terms[column];
+            }
+        }
+    }
+
+    return solveLinear3x3(matrix, vector);
+}
+
+function calculateBackgroundSampleStats(samples) {
+    let sum = 0;
+    let squareSum = 0;
+
+    for (const sample of samples) {
+        const luminance = 0.2126 * sample.r + 0.7152 * sample.g + 0.0722 * sample.b;
+        sum += luminance;
+        squareSum += luminance * luminance;
+    }
+
+    const count = samples.length;
+    const mean = count > 0 ? sum / count : 0;
+    return {
+        count,
+        mean,
+        std: count > 0 ? Math.sqrt(Math.max(0, squareSum / count - mean * mean)) : Number.POSITIVE_INFINITY
+    };
+}
+
+function sampleFlatBackgroundPixels(imageData, alphaMap, position, {
+    pad = KNOWN_48_FLAT_FILL_PAD,
+    outsideAlphaMax = KNOWN_48_FLAT_FILL_OUTSIDE_ALPHA_MAX
+} = {}) {
+    const samples = [];
+    const left = Math.max(0, position.x - pad);
+    const top = Math.max(0, position.y - pad);
+    const right = Math.min(imageData.width - 1, position.x + position.width + pad - 1);
+    const bottom = Math.min(imageData.height - 1, position.y + position.height + pad - 1);
+
+    for (let y = top; y <= bottom; y++) {
+        for (let x = left; x <= right; x++) {
+            const inside = x >= position.x &&
+                x < position.x + position.width &&
+                y >= position.y &&
+                y < position.y + position.height;
+
+            if (inside) {
+                const row = y - position.y;
+                const col = x - position.x;
+                if (alphaMap[row * position.width + col] > outsideAlphaMax) {
+                    continue;
+                }
+            }
+
+            const pixelIndex = (y * imageData.width + x) * 4;
+            samples.push({
+                x: (x - position.x) / Math.max(1, position.width),
+                y: (y - position.y) / Math.max(1, position.height),
+                r: imageData.data[pixelIndex],
+                g: imageData.data[pixelIndex + 1],
+                b: imageData.data[pixelIndex + 2]
+            });
+        }
+    }
+
+    return samples;
+}
+
+function applyFlatBackgroundFill({
+    sourceImageData,
+    alphaMap,
+    position,
+    minAlpha,
+    maxAlpha,
+    strength,
+    maxBackgroundStd = KNOWN_48_FLAT_FILL_MAX_BACKGROUND_STD,
+    edgeWeightFloor = 0.35
+}) {
+    const samples = sampleFlatBackgroundPixels(sourceImageData, alphaMap, position);
+    const stats = calculateBackgroundSampleStats(samples);
+    if (
+        stats.count < 24 ||
+        stats.std > maxBackgroundStd
+    ) {
+        return null;
+    }
+
+    const redPlane = fitColorPlane(samples, 'r');
+    const greenPlane = fitColorPlane(samples, 'g');
+    const bluePlane = fitColorPlane(samples, 'b');
+    if (!redPlane || !greenPlane || !bluePlane) return null;
+
+    const candidate = cloneImageData(sourceImageData);
+    const edgeMask = createAlphaGradientMask({
+        alphaMap,
+        width: position.width,
+        height: position.height
+    });
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const localIndex = row * position.width + col;
+            const alpha = alphaMap[localIndex];
+            if (alpha < minAlpha || alpha > maxAlpha) continue;
+
+            const x = col / Math.max(1, position.width);
+            const y = row / Math.max(1, position.height);
+            const target = [
+                redPlane[0] + redPlane[1] * x + redPlane[2] * y,
+                greenPlane[0] + greenPlane[1] * x + greenPlane[2] * y,
+                bluePlane[0] + bluePlane[1] * x + bluePlane[2] * y
+            ];
+            const pixelIndex = ((position.y + row) * candidate.width + position.x + col) * 4;
+            const edgeWeight = getAlphaGradientWeight(edgeMask, localIndex, edgeWeightFloor);
+            const blend = Math.max(0, Math.min(1, strength * Math.min(1, alpha / 0.2) * edgeWeight));
+            for (let channel = 0; channel < 3; channel++) {
+                candidate.data[pixelIndex + channel] = clampChannel(
+                    candidate.data[pixelIndex + channel] * (1 - blend) + target[channel] * blend
+                );
+            }
+        }
+    }
+
+    return { imageData: candidate, stats };
+}
+
+function refineKnown48FlatBackgroundResidual({
+    sourceImageData,
+    alphaMap,
+    position,
+    baselineSpatialScore,
+    baselineGradientScore,
+    minGradientImprovement = KNOWN_48_FLAT_FILL_MIN_GRADIENT_IMPROVEMENT
+}) {
+    if (
+        position?.width < KNOWN_48_EDGE_CLEANUP_MIN_SIZE ||
+        position?.width > KNOWN_48_EDGE_CLEANUP_MAX_SIZE ||
+        baselineGradientScore < KNOWN_48_FLAT_FILL_MIN_GRADIENT
+    ) {
+        return null;
+    }
+
+    let best = null;
+    for (const preset of KNOWN_48_FLAT_FILL_PRESETS) {
+        const filled = applyFlatBackgroundFill({
+            sourceImageData,
+            alphaMap,
+            position,
+            ...preset
+        });
+        if (!filled) continue;
+
+        const spatialScore = computeRegionSpatialCorrelation({
+            imageData: filled.imageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const gradientScore = computeRegionGradientCorrelation({
+            imageData: filled.imageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const gradientImprovement = baselineGradientScore - gradientScore;
+        const keptSpatial = Math.abs(spatialScore) <= Math.abs(baselineSpatialScore) + KNOWN_48_FLAT_FILL_MAX_SPATIAL_DRIFT;
+        const acceptedSpatial = Math.abs(spatialScore) <= KNOWN_48_FLAT_FILL_MAX_ACCEPTED_ABS_SPATIAL;
+        if (
+            gradientImprovement < minGradientImprovement ||
+            !keptSpatial ||
+            !acceptedSpatial
+        ) {
+            continue;
+        }
+
+        const cost = Math.abs(spatialScore) * 0.45 + Math.max(0, gradientScore);
+        if (!best || cost < best.cost) {
+            best = {
+                imageData: filled.imageData,
+                spatialScore,
+                gradientScore,
+                stats: filled.stats,
+                preset: preset.name,
+                cost
+            };
+        }
+    }
+
+    return best;
+}
+
+function isNewMargin96AlphaVariantConfig(config) {
+    return config?.logoSize === 96 &&
+        config.marginRight === 192 &&
+        config.marginBottom === 192 &&
+        config.alphaVariant === '20260520';
+}
+
+function refineNewMargin96FlatBackgroundResidual({
+    sourceImageData,
+    alphaMap,
+    position,
+    config,
+    alphaGain,
+    baselineSpatialScore,
+    baselineGradientScore
+}) {
+    if (
+        !isNewMargin96AlphaVariantConfig(config) ||
+        alphaGain !== 1 ||
+        position?.width !== 96 ||
+        baselineGradientScore < NEW_MARGIN_96_FLAT_FILL_MIN_GRADIENT
+    ) {
+        return null;
+    }
+
+    let best = null;
+    for (const preset of NEW_MARGIN_96_FLAT_FILL_PRESETS) {
+        const filled = applyFlatBackgroundFill({
+            sourceImageData,
+            alphaMap,
+            position,
+            maxBackgroundStd: NEW_MARGIN_96_FLAT_FILL_MAX_BACKGROUND_STD,
+            edgeWeightFloor: 0.85,
+            ...preset
+        });
+        if (!filled) continue;
+
+        const spatialScore = computeRegionSpatialCorrelation({
+            imageData: filled.imageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const gradientScore = computeRegionGradientCorrelation({
+            imageData: filled.imageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const gradientImprovement = baselineGradientScore - gradientScore;
+        const keptSpatial = Math.abs(spatialScore) <= Math.abs(baselineSpatialScore) + NEW_MARGIN_96_FLAT_FILL_MAX_SPATIAL_DRIFT;
+        const acceptedSpatial = Math.abs(spatialScore) <= NEW_MARGIN_96_FLAT_FILL_MAX_ACCEPTED_ABS_SPATIAL;
+        if (
+            gradientImprovement < NEW_MARGIN_96_FLAT_FILL_MIN_GRADIENT_IMPROVEMENT ||
+            !keptSpatial ||
+            !acceptedSpatial
+        ) {
+            continue;
+        }
+
+        const cost = Math.abs(spatialScore) * 0.6 + Math.max(0, gradientScore);
+        if (!best || cost < best.cost) {
+            best = {
+                imageData: filled.imageData,
+                spatialScore,
+                gradientScore,
+                stats: filled.stats,
+                preset: preset.name,
+                cost
+            };
+        }
+    }
+
+    return best;
+}
+
+function pixelLuminance(data, index) {
+    return 0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2];
+}
+
+function applyLumaEdgeCorrection({
+    sourceImageData,
+    alphaMap,
+    position,
+    minAlpha,
+    maxAlpha,
+    referenceAlphaMax,
+    radius,
+    strength,
+    colorSigma,
+    maxDelta
+}) {
+    const candidate = cloneImageData(sourceImageData);
+    const { data, width: imageWidth, height: imageHeight } = sourceImageData;
+    const size = position.width;
+    const colorSigmaSafe = Math.max(1, colorSigma);
+    const edgeMask = createAlphaGradientMask({
+        alphaMap,
+        width: size,
+        height: size
+    });
+
+    for (let row = 0; row < size; row++) {
+        for (let col = 0; col < size; col++) {
+            const localIndex = row * size + col;
+            const alpha = alphaMap[localIndex];
+            if (alpha < minAlpha || alpha > maxAlpha) continue;
+
+            const x = position.x + col;
+            const y = position.y + row;
+            const pixelIndex = (y * imageWidth + x) * 4;
+            const currentLum = pixelLuminance(data, pixelIndex);
+            let weightedLum = 0;
+            let sumWeight = 0;
+
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
+                    if (dx === 0 && dy === 0) continue;
+                    const distanceSquared = dx * dx + dy * dy;
+                    if (distanceSquared > radius * radius) continue;
+
+                    const localX = col + dx;
+                    const localY = row + dy;
+                    const pixelX = x + dx;
+                    const pixelY = y + dy;
+                    if (pixelX < 0 || pixelY < 0 || pixelX >= imageWidth || pixelY >= imageHeight) continue;
+
+                    let neighborAlpha = 0;
+                    if (localX >= 0 && localY >= 0 && localX < size && localY < size) {
+                        neighborAlpha = alphaMap[localY * size + localX];
+                    }
+                    if (neighborAlpha > referenceAlphaMax && neighborAlpha >= alpha) continue;
+
+                    const neighborIndex = (pixelY * imageWidth + pixelX) * 4;
+                    const neighborLum = pixelLuminance(data, neighborIndex);
+                    const colorDistance =
+                        Math.abs(data[pixelIndex] - data[neighborIndex]) +
+                        Math.abs(data[pixelIndex + 1] - data[neighborIndex + 1]) +
+                        Math.abs(data[pixelIndex + 2] - data[neighborIndex + 2]);
+                    const colorWeight = Math.exp(
+                        -(colorDistance * colorDistance) / (2 * colorSigmaSafe * colorSigmaSafe * 9)
+                    );
+                    const alphaWeight = neighborAlpha <= referenceAlphaMax ? 1.25 : 0.65;
+                    const distanceWeight = 1 / Math.sqrt(distanceSquared);
+                    const weight = colorWeight * alphaWeight * distanceWeight;
+                    weightedLum += neighborLum * weight;
+                    sumWeight += weight;
+                }
+            }
+
+            if (sumWeight <= 0) continue;
+
+            const targetLum = weightedLum / sumWeight;
+            const delta = Math.max(-maxDelta, Math.min(maxDelta, targetLum - currentLum)) * strength;
+            const edgeWeight = getAlphaGradientWeight(edgeMask, localIndex);
+            const scaledStrength = Math.min(1, Math.max(0, alpha / Math.max(maxAlpha, 1e-6))) * edgeWeight;
+            const finalDelta = delta * scaledStrength;
+            candidate.data[pixelIndex] = clampChannel(data[pixelIndex] + finalDelta);
+            candidate.data[pixelIndex + 1] = clampChannel(data[pixelIndex + 1] + finalDelta);
+            candidate.data[pixelIndex + 2] = clampChannel(data[pixelIndex + 2] + finalDelta);
+        }
+    }
+
+    return candidate;
+}
+
+function refineKnown48LumaEdgeResidual({
+    sourceImageData,
+    alphaMap,
+    position,
+    baselineSpatialScore,
+    baselineGradientScore
+}) {
+    if (
+        position?.width < KNOWN_48_EDGE_CLEANUP_MIN_SIZE ||
+        position?.width > KNOWN_48_EDGE_CLEANUP_MAX_SIZE ||
+        baselineGradientScore < KNOWN_48_LUMA_EDGE_MIN_GRADIENT
+    ) {
+        return null;
+    }
+
+    let best = null;
+    for (const preset of KNOWN_48_LUMA_EDGE_PRESETS) {
+        const candidate = applyLumaEdgeCorrection({
+            sourceImageData,
+            alphaMap,
+            position,
+            ...preset
+        });
+        const spatialScore = computeRegionSpatialCorrelation({
+            imageData: candidate,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const gradientScore = computeRegionGradientCorrelation({
+            imageData: candidate,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const gradientImprovement = baselineGradientScore - gradientScore;
+        const keptSpatial = Math.abs(spatialScore) <= Math.abs(baselineSpatialScore) + KNOWN_48_LUMA_EDGE_MAX_SPATIAL_DRIFT;
+        const acceptedSpatial = Math.abs(spatialScore) <= KNOWN_48_LUMA_EDGE_MAX_ACCEPTED_ABS_SPATIAL;
+        if (
+            gradientImprovement < KNOWN_48_LUMA_EDGE_MIN_GRADIENT_IMPROVEMENT ||
+            !keptSpatial ||
+            !acceptedSpatial
+        ) {
+            continue;
+        }
+
+        const cost = Math.abs(spatialScore) * 0.45 + Math.max(0, gradientScore);
+        if (!best || cost < best.cost) {
+            best = {
+                imageData: candidate,
+                spatialScore,
+                gradientScore,
+                preset: preset.name,
+                cost
+            };
+        }
+    }
+
+    return best;
 }
 
 function expandPosition(position, imageData, pad) {
@@ -1009,7 +1622,8 @@ function refinePreviewResidualEdge({
     baselineGradientScore,
     minGradientImprovement = PREVIEW_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT,
     maxSpatialDrift = PREVIEW_EDGE_CLEANUP_MAX_SPATIAL_DRIFT,
-    allowAggressivePresets = false
+    allowAggressivePresets = false,
+    mode = 'preview'
 }) {
     const baselineHalo = assessAlphaBandHalo({
         imageData: sourceImageData,
@@ -1017,12 +1631,13 @@ function refinePreviewResidualEdge({
         alphaMap
     });
     const baselinePositiveHalo = baselineHalo.positiveDeltaLum;
-    if (!shouldRefinePreviewResidualEdge({
+    if (!shouldRefineResidualEdge({
         source,
         position,
         baselineSpatialScore,
         baselineGradientScore,
-        baselinePositiveHalo
+        baselinePositiveHalo,
+        mode
     })) {
         return null;
     }
@@ -1145,10 +1760,11 @@ export function processWatermarkImageData(imageData, options = {}) {
         afterSpatialScore,
         afterGradientScore,
         suppressionGain: stageSuppressionGain = null,
-        cost = null
+        cost = null,
+        allowSameAlphaGain = false
     }) => {
         if (!stage || !Number.isFinite(fromAlphaGain) || !Number.isFinite(toAlphaGain)) return;
-        if (Math.abs(fromAlphaGain - toAlphaGain) < 0.0001) return;
+        if (!allowSameAlphaGain && Math.abs(fromAlphaGain - toAlphaGain) < 0.0001) return;
 
         alphaAdjustmentStages.push({
             stage,
@@ -1216,6 +1832,16 @@ export function processWatermarkImageData(imageData, options = {}) {
 
     const selectedTrial = initialSelection.selectedTrial;
     const usePreviewAnchorFastCleanup = shouldUsePreviewAnchorFastCleanup(selectedTrial, position);
+    const useKnown48EdgeCleanup = shouldUseKnown48EdgeCleanup({
+        selectedTrial,
+        position,
+        source
+    });
+    const useV2SmallEdgeCleanup = shouldUseV2SmallEdgeCleanup({
+        selectedTrial,
+        position,
+        source
+    });
 
     let finalImageData = selectedTrial.imageData;
 
@@ -1418,6 +2044,7 @@ export function processWatermarkImageData(imageData, options = {}) {
         currentGradientScore: finalProcessedGradientScore,
         currentAlphaGain: alphaGain,
         originalSpatialScore,
+        originalGradientScore,
         originalNearBlackRatio: calculateNearBlackRatio(originalImageData, position)
     });
     if (weakAlphaFineTune) {
@@ -1503,7 +2130,24 @@ export function processWatermarkImageData(imageData, options = {}) {
             source,
             baselineSpatialScore: finalProcessedSpatialScore,
             baselineGradientScore: finalProcessedGradientScore,
-            allowAggressivePresets: usePreviewAnchorFastCleanup
+            minGradientImprovement: useKnown48EdgeCleanup
+                ? KNOWN_48_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT
+                : (
+                    useV2SmallEdgeCleanup
+                        ? V2_SMALL_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT
+                        : PREVIEW_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT
+                ),
+            maxSpatialDrift: useKnown48EdgeCleanup
+                ? KNOWN_48_EDGE_CLEANUP_MAX_SPATIAL_DRIFT
+                : (
+                    useV2SmallEdgeCleanup
+                        ? V2_SMALL_EDGE_CLEANUP_MAX_SPATIAL_DRIFT
+                        : PREVIEW_EDGE_CLEANUP_MAX_SPATIAL_DRIFT
+                ),
+            allowAggressivePresets: usePreviewAnchorFastCleanup,
+            mode: useKnown48EdgeCleanup
+                ? 'known-48'
+                : (useV2SmallEdgeCleanup ? 'v2-small' : 'preview')
         });
         previewEdgeCleanupElapsedMs += nowMs() - previewEdgeStartedAt;
 
@@ -1515,7 +2159,7 @@ export function processWatermarkImageData(imageData, options = {}) {
         finalProcessedSpatialScore = previewEdgeRefined.spatialScore;
         finalProcessedGradientScore = previewEdgeRefined.gradientScore;
         suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
-        source = `${source}+edge-cleanup`;
+        source = `${source}+${useV2SmallEdgeCleanup ? 'v2-small-edge-cleanup' : 'edge-cleanup'}`;
         return true;
     };
 
@@ -1570,11 +2214,109 @@ export function processWatermarkImageData(imageData, options = {}) {
     }
 
     let previewEdgeCleanupPassCount = 0;
-    while (ENABLE_VISUAL_POST_PROCESSING && previewEdgeCleanupPassCount < PREVIEW_EDGE_CLEANUP_MAX_APPLIED_PASSES) {
+    const shouldRunEdgeCleanup = ENABLE_VISUAL_POST_PROCESSING || useKnown48EdgeCleanup || useV2SmallEdgeCleanup;
+    while (shouldRunEdgeCleanup && previewEdgeCleanupPassCount < PREVIEW_EDGE_CLEANUP_MAX_APPLIED_PASSES) {
         if (!applyPreviewEdgeCleanup()) {
             break;
         }
         previewEdgeCleanupPassCount++;
+    }
+
+    if (useKnown48EdgeCleanup) {
+        let flatFillPassCount = 0;
+        while (flatFillPassCount < KNOWN_48_FLAT_FILL_MAX_APPLIED_PASSES) {
+            const flatBackgroundRefined = refineKnown48FlatBackgroundResidual({
+                sourceImageData: finalImageData,
+                alphaMap,
+                position,
+                baselineSpatialScore: finalProcessedSpatialScore,
+                baselineGradientScore: finalProcessedGradientScore,
+                minGradientImprovement: flatFillPassCount === 0
+                    ? KNOWN_48_FLAT_FILL_MIN_GRADIENT_IMPROVEMENT
+                    : KNOWN_48_FLAT_FILL_SECOND_PASS_MIN_GRADIENT_IMPROVEMENT
+            });
+
+            if (!flatBackgroundRefined) {
+                break;
+            }
+
+            recordAlphaAdjustmentStage({
+                stage: 'known-48-flat-background-fill',
+                fromAlphaGain: alphaGain,
+                toAlphaGain: alphaGain,
+                beforeSpatialScore: finalProcessedSpatialScore,
+                beforeGradientScore: finalProcessedGradientScore,
+                afterSpatialScore: flatBackgroundRefined.spatialScore,
+                afterGradientScore: flatBackgroundRefined.gradientScore,
+                suppressionGain: originalSpatialScore - flatBackgroundRefined.spatialScore,
+                cost: flatBackgroundRefined.cost,
+                allowSameAlphaGain: true
+            });
+            finalImageData = flatBackgroundRefined.imageData;
+            finalProcessedSpatialScore = flatBackgroundRefined.spatialScore;
+            finalProcessedGradientScore = flatBackgroundRefined.gradientScore;
+            suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
+            source = `${source}+flat-fill`;
+            flatFillPassCount++;
+        }
+
+        const lumaEdgeRefined = refineKnown48LumaEdgeResidual({
+            sourceImageData: finalImageData,
+            alphaMap,
+            position,
+            baselineSpatialScore: finalProcessedSpatialScore,
+            baselineGradientScore: finalProcessedGradientScore
+        });
+
+        if (lumaEdgeRefined) {
+            recordAlphaAdjustmentStage({
+                stage: 'known-48-luma-edge-correction',
+                fromAlphaGain: alphaGain,
+                toAlphaGain: alphaGain,
+                beforeSpatialScore: finalProcessedSpatialScore,
+                beforeGradientScore: finalProcessedGradientScore,
+                afterSpatialScore: lumaEdgeRefined.spatialScore,
+                afterGradientScore: lumaEdgeRefined.gradientScore,
+                suppressionGain: originalSpatialScore - lumaEdgeRefined.spatialScore,
+                cost: lumaEdgeRefined.cost,
+                allowSameAlphaGain: true
+            });
+            finalImageData = lumaEdgeRefined.imageData;
+            finalProcessedSpatialScore = lumaEdgeRefined.spatialScore;
+            finalProcessedGradientScore = lumaEdgeRefined.gradientScore;
+            suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
+            source = `${source}+luma-edge`;
+        }
+    }
+
+    const newMargin96FlatFillRefined = refineNewMargin96FlatBackgroundResidual({
+        sourceImageData: finalImageData,
+        alphaMap,
+        position,
+        config,
+        alphaGain,
+        baselineSpatialScore: finalProcessedSpatialScore,
+        baselineGradientScore: finalProcessedGradientScore
+    });
+
+    if (newMargin96FlatFillRefined) {
+        recordAlphaAdjustmentStage({
+            stage: 'new-margin-96-flat-background-fill',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: newMargin96FlatFillRefined.spatialScore,
+            afterGradientScore: newMargin96FlatFillRefined.gradientScore,
+            suppressionGain: originalSpatialScore - newMargin96FlatFillRefined.spatialScore,
+            cost: newMargin96FlatFillRefined.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = newMargin96FlatFillRefined.imageData;
+        finalProcessedSpatialScore = newMargin96FlatFillRefined.spatialScore;
+        finalProcessedGradientScore = newMargin96FlatFillRefined.gradientScore;
+        suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
+        source = `${source}+flat-fill`;
     }
 
     const smallPreviewRefinementStartedAt = nowMs();
@@ -1623,6 +2365,12 @@ export function processWatermarkImageData(imageData, options = {}) {
         debugTimings.totalMs = nowMs() - totalStartedAt;
     }
 
+    const residualVisibility = assessWatermarkResidualVisibility({
+        imageData: finalImageData,
+        position,
+        alphaMap
+    });
+
     return {
         imageData: finalImageData,
         meta: createWatermarkMeta({
@@ -1634,6 +2382,7 @@ export function processWatermarkImageData(imageData, options = {}) {
             processedSpatialScore: finalProcessedSpatialScore,
             processedGradientScore: finalProcessedGradientScore,
             suppressionGain,
+            residualVisibility,
             templateWarp,
             alphaGain,
             passCount,

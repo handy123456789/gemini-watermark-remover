@@ -374,6 +374,122 @@ test('pickBetterCandidate should keep the default anchor when a local shift lose
     assert.equal(selected, defaultAnchorCandidate);
 });
 
+test('pickBetterCandidate should preserve a strong 48px large-margin anchor over a weak official anchor', () => {
+    const largeMarginCandidate = {
+        accepted: true,
+        source: 'standard',
+        config: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+        position: { x: 880, y: 880, width: 48, height: 48 },
+        provenance: null,
+        validationCost: 1.507943672019685,
+        improvement: 1.37237124311371,
+        originalSpatialScore: 0.9998442377606915,
+        originalGradientScore: 0.9997840403609796
+    };
+    const weakOfficialCandidate = {
+        accepted: true,
+        source: 'standard+catalog+validated',
+        config: { logoSize: 48, marginRight: 32, marginBottom: 32 },
+        position: { x: 944, y: 944, width: 48, height: 48 },
+        provenance: {
+            catalogVariant: true,
+            catalogFamily: 'exact-official-current',
+            catalogSourcePriority: 0
+        },
+        validationCost: 0.4051653941725306,
+        improvement: 0.386727537075713,
+        originalSpatialScore: 0.02671828846379963,
+        originalGradientScore: 0.12516799191854763
+    };
+
+    assert.equal(
+        pickBetterCandidate(largeMarginCandidate, weakOfficialCandidate, 0.002),
+        largeMarginCandidate
+    );
+    assert.equal(
+        pickBetterCandidate(weakOfficialCandidate, largeMarginCandidate, 0.002),
+        largeMarginCandidate
+    );
+});
+
+test('pickBetterCandidate should preserve a strong full 96px anchor over weak 48px large-margin evidence', () => {
+    const canonical96Candidate = {
+        accepted: true,
+        source: 'standard',
+        config: { logoSize: 96, marginRight: 64, marginBottom: 64 },
+        position: { x: 1536, y: 2358, width: 96, height: 96 },
+        provenance: null,
+        validationCost: 1.012,
+        improvement: 0.54,
+        originalSpatialScore: 0.4815,
+        originalGradientScore: 0.2747,
+        processedSpatialScore: 0.0188,
+        processedGradientScore: 0.023,
+        residual: { cleared: true }
+    };
+    const weakLargeMargin48Candidate = {
+        accepted: true,
+        source: 'standard+catalog+gain+validated+luma-edge',
+        config: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+        position: { x: 1552, y: 2374, width: 48, height: 48 },
+        provenance: {
+            catalogVariant: true,
+            catalogFamily: 'exact-official-current',
+            catalogSourcePriority: 0
+        },
+        validationCost: 0.314,
+        improvement: 0.22,
+        originalSpatialScore: 0.186,
+        originalGradientScore: 0.089,
+        processedSpatialScore: -0.081,
+        processedGradientScore: 0.186,
+        residual: { cleared: false }
+    };
+
+    const selected = pickBetterCandidate(canonical96Candidate, weakLargeMargin48Candidate, 0.002);
+
+    assert.equal(selected, canonical96Candidate);
+});
+
+test('pickBetterCandidate should preserve a strong low-residual 96px anchor even before residual clears', () => {
+    const canonical96Candidate = {
+        accepted: true,
+        source: 'standard',
+        config: { logoSize: 96, marginRight: 64, marginBottom: 64 },
+        position: { x: 1632, y: 2230, width: 96, height: 96 },
+        provenance: null,
+        validationCost: 0.44,
+        improvement: 0.62,
+        originalSpatialScore: 0.6578,
+        originalGradientScore: 0.7131,
+        processedSpatialScore: 0.037,
+        processedGradientScore: 0.2026,
+        residual: { cleared: false }
+    };
+    const weakLargeMargin48Candidate = {
+        accepted: true,
+        source: 'standard+catalog+gain',
+        config: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+        position: { x: 1648, y: 2246, width: 48, height: 48 },
+        provenance: {
+            catalogVariant: true,
+            catalogFamily: 'exact-official-current',
+            catalogSourcePriority: 0
+        },
+        validationCost: 0.31,
+        improvement: 0.33,
+        originalSpatialScore: 0.3252,
+        originalGradientScore: 0.1252,
+        processedSpatialScore: 0.0079,
+        processedGradientScore: 0.3364,
+        residual: { cleared: false }
+    };
+
+    const selected = pickBetterCandidate(canonical96Candidate, weakLargeMargin48Candidate, 0.002);
+
+    assert.equal(selected, canonical96Candidate);
+});
+
 test('pickBetterCandidate should still allow a local shift when the default anchor lacks strong evidence', () => {
     const defaultAnchorCandidate = {
         accepted: true,

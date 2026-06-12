@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+    computeSizeAdjustedConfidence,
     interpolateAlphaMap,
     detectAdaptiveWatermarkRegion,
     computeRegionSpatialCorrelation,
@@ -96,6 +97,20 @@ test('interpolateAlphaMap should resize alpha map and keep corner values stable'
     assert.ok(Math.abs(out[3] - 1.0) < 1e-6);
     assert.ok(Math.abs(out[12] - 1.0) < 1e-6);
     assert.ok(Math.abs(out[15] - 0.0) < 1e-6);
+});
+
+test('computeSizeAdjustedConfidence should use gentle cube-root size penalty', () => {
+    const previewScore = computeSizeAdjustedConfidence(0.9, 28);
+    assert.ok(
+        Math.abs(previewScore - 0.9 * Math.cbrt(28 / 96)) < 1e-12,
+        `previewScore=${previewScore}`
+    );
+    assert.ok(
+        previewScore > 0.9 * Math.sqrt(28 / 96),
+        `expected cube-root penalty to be gentler than sqrt, got ${previewScore}`
+    );
+    assert.equal(computeSizeAdjustedConfidence(0.9, 128), 0.9);
+    assert.equal(computeSizeAdjustedConfidence(0.9, 0), 0);
 });
 
 test('detectAdaptiveWatermarkRegion should locate non-standard watermark size', () => {

@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
 
 import { calculateAlphaMap } from '../src/core/alphaMap.js';
+import { getEmbeddedAlphaMap } from '../src/core/embeddedAlphaMaps.js';
 import {
     computeRegionGradientCorrelation,
     computeRegionSpatialCorrelation,
@@ -106,7 +107,9 @@ function createAlphaResolver({ alpha48, alpha96 }) {
     return (size) => {
         if (cache.has(size)) return cache.get(size);
         let alphaMap = null;
-        if (size === 48) {
+        if (size === '36-v2') {
+            alphaMap = getEmbeddedAlphaMap('36-v2');
+        } else if (size === 48) {
             alphaMap = alpha48;
         } else if (size === 96) {
             alphaMap = alpha96;
@@ -319,7 +322,7 @@ function rectSvg({ x, y, width, height, color, label }) {
         `font-family="Arial, sans-serif" font-size="14" font-weight="700">${escapeSvgText(label)}</text>`;
 }
 
-async function writeOverlay({ filePath, outputPath, imageData, initialConfig, bestCandidate }) {
+async function writeOverlay({ filePath, outputPath, imageData, initialConfig, selectedCandidate, bestCandidate }) {
     const cropWidth = Math.min(OVERLAY_CROP_SIZE, imageData.width);
     const cropHeight = Math.min(OVERLAY_CROP_SIZE, imageData.height);
     const cropLeft = imageData.width - cropWidth;
@@ -350,6 +353,17 @@ async function writeOverlay({ filePath, outputPath, imageData, initialConfig, be
         color: '#f2994a',
         label: '48/96'
     }));
+
+    if (selectedCandidate) {
+        rects.push(rectSvg({
+            x: selectedCandidate.x - cropLeft,
+            y: selectedCandidate.y - cropTop,
+            width: selectedCandidate.size,
+            height: selectedCandidate.size,
+            color: '#eb5757',
+            label: `selected ${selectedCandidate.size}/${selectedCandidate.marginRight}/${selectedCandidate.marginBottom}`
+        }));
+    }
 
     if (bestCandidate) {
         rects.push(rectSvg({
@@ -465,6 +479,19 @@ async function analyzeRecord({ record, outputDir, alpha48, alpha96, alpha96Varia
         { logoSize: 96, marginRight: 64, marginBottom: 64 },
         { logoSize: 96, marginRight: 192, marginBottom: 192 }
     ];
+    const selectedConfig = record.meta?.config ?? null;
+    const selectedGeometry = selectedConfig
+        ? createGeometryCandidate({
+            imageData,
+            resolveAlphaMap,
+            size: selectedConfig.logoSize,
+            marginRight: selectedConfig.marginRight,
+            marginBottom: selectedConfig.marginBottom
+        })
+        : null;
+    const selectedEvaluation = selectedGeometry
+        ? evaluateFineCandidates({ imageData, fineCandidates: [selectedGeometry] })
+        : null;
     const coarseTop = scanCoarseGeometry({ imageData, resolveAlphaMap });
     const fineCandidates = expandFineGeometry({
         imageData,
@@ -490,6 +517,7 @@ async function analyzeRecord({ record, outputDir, alpha48, alpha96, alpha96Varia
         outputPath: overlayPath,
         imageData,
         initialConfig,
+        selectedCandidate: selectedGeometry,
         bestCandidate: bestForOverlay
     });
 
@@ -506,6 +534,9 @@ async function analyzeRecord({ record, outputDir, alpha48, alpha96, alpha96Varia
             originalGradient: toFixedNumber(record.meta?.detection?.originalGradientScore)
         },
         initialConfig,
+        selectedGeometry: serializeCandidate(selectedGeometry),
+        selectedBestAccepted: serializeCandidate(selectedEvaluation?.bestAccepted),
+        selectedBestValidation: serializeCandidate(selectedEvaluation?.bestValidation),
         coarseTop: coarseTop.slice(0, 8).map(serializeCandidate),
         bestEvidence: serializeCandidate(evaluated.bestEvidence),
         bestValidation: serializeCandidate(evaluated.bestValidation),

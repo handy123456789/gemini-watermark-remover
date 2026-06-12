@@ -45,6 +45,31 @@ export interface WatermarkConfig {
     logoSize: number;
     marginRight: number;
     marginBottom: number;
+    alphaVariant?: string;
+}
+
+export interface WatermarkHaloMeta {
+    bandCount: number;
+    outerCount: number;
+    bandMeanLum: number;
+    outerMeanLum: number;
+    bandStdLum: number;
+    outerStdLum: number;
+    deltaLum: number;
+    positiveDeltaLum: number;
+    visibility: number;
+}
+
+export interface WatermarkResidualVisibilityMeta {
+    visible: boolean;
+    positiveHaloLum: number;
+    haloVisibility: number;
+    spatialResidual: number;
+    gradientResidual: number;
+    visiblePositiveHalo: boolean;
+    visibleGradientResidual: boolean;
+    visibleSpatialResidual: boolean;
+    halo?: WatermarkHaloMeta;
 }
 
 export interface WatermarkDetectionMeta {
@@ -54,6 +79,7 @@ export interface WatermarkDetectionMeta {
     processedSpatialScore: number | null;
     processedGradientScore: number | null;
     suppressionGain: number | null;
+    residualVisibility?: WatermarkResidualVisibilityMeta | null;
 }
 
 export interface WatermarkSelectionDebug {
@@ -94,7 +120,7 @@ export interface RemoveOptions {
     engine?: WatermarkEngine;
     alpha48?: Float32Array;
     alpha96?: Float32Array;
-    getAlphaMap?: (size: number) => Float32Array;
+    getAlphaMap?: (size: number | string) => Float32Array;
 }
 
 export interface ImageDataRemovalResult {

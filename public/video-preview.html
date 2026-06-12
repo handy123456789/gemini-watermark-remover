@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Gemini 视频水印本地处理 MVP</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: oklch(98% 0.006 170);
+      --panel: oklch(99% 0.004 170);
+      --panel-2: oklch(96% 0.008 170);
+      --text: oklch(24% 0.018 170);
+      --muted: oklch(52% 0.018 170);
+      --line: oklch(88% 0.012 170);
+      --accent: oklch(56% 0.13 168);
+      --accent-strong: oklch(48% 0.14 168);
+      --danger: oklch(55% 0.18 28);
+      --warn: oklch(64% 0.14 72);
+      --success: oklch(52% 0.13 150);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+    button, input, select { font: inherit; }
+    button, .download-link {
+      min-height: 38px;
+      border-radius: 7px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      padding: 0 14px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      text-decoration: none;
+      transition: background 160ms ease-out, border-color 160ms ease-out, color 160ms ease-out;
+    }
+    button:hover:not(:disabled), .download-link:hover:not([aria-disabled="true"]) {
+      border-color: oklch(76% 0.04 168);
+      background: oklch(97% 0.014 168);
+    }
+    button:focus-visible, .download-link:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid oklch(70% 0.12 168);
+      outline-offset: 2px;
+    }
+    button:disabled, .download-link[aria-disabled="true"] {
+      opacity: 0.46;
+      cursor: not-allowed;
+    }
+    .primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: oklch(99% 0.004 170);
+    }
+    .primary:hover:not(:disabled) {
+      border-color: var(--accent-strong);
+      background: var(--accent-strong);
+    }
+    .shell {
+      width: min(1280px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 22px 0 28px;
+    }
+    header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 8px 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.45rem;
+      line-height: 1.2;
+      font-weight: 720;
+    }
+    header p, .muted {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 18px;
+      padding-top: 18px;
+    }
+    .workspace {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      min-width: 0;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      min-width: 0;
+    }
+    .panel-head {
+      height: 42px;
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      font-size: 0.9rem;
+      font-weight: 650;
+    }
+    .video-box {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      background: oklch(18% 0.01 170);
+      overflow: hidden;
+      border-radius: 0 0 8px 8px;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: contain;
+      background: oklch(18% 0.01 170);
+    }
+    .empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: oklch(78% 0.012 170);
+      font-size: 0.92rem;
+      text-align: center;
+      padding: 20px;
+    }
+    .side {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .dropzone {
+      border: 1px dashed oklch(72% 0.04 168);
+      background: oklch(97% 0.012 168);
+      border-radius: 8px;
+      padding: 18px;
+      cursor: pointer;
+      transition: background 160ms ease-out, border-color 160ms ease-out;
+    }
+    .dropzone[data-dragging="true"], .dropzone:hover {
+      background: oklch(95% 0.02 168);
+      border-color: var(--accent);
+    }
+    .dropzone strong {
+      display: block;
+      font-size: 0.98rem;
+      margin-bottom: 6px;
+    }
+    .controls {
+      display: grid;
+      gap: 14px;
+      padding: 14px;
+    }
+    .field {
+      display: grid;
+      gap: 7px;
+    }
+    label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 620;
+    }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    input[type="number"], select {
+      width: 100%;
+      min-height: 36px;
+      border-radius: 7px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      padding: 0 10px;
+    }
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+    .check input { accent-color: var(--accent); }
+    .preset-row {
+      display: grid;
+      gap: 7px;
+    }
+    .preset-row button {
+      justify-content: flex-start;
+      width: 100%;
+      color: var(--accent-strong);
+      border-color: oklch(80% 0.045 168);
+      background: oklch(97% 0.014 168);
+    }
+    .preset-row button:hover:not(:disabled) {
+      background: oklch(95% 0.024 168);
+      border-color: oklch(70% 0.07 168);
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .actions .primary, .actions .download-link { grid-column: span 2; }
+    .progress {
+      height: 8px;
+      background: var(--panel-2);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: var(--accent);
+      transition: width 180ms ease-out;
+    }
+    .status {
+      min-height: 40px;
+      border-radius: 7px;
+      padding: 10px;
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.45;
+    }
+    .status[data-tone="error"] { color: var(--danger); }
+    .status[data-tone="warn"] { color: var(--warn); }
+    .status[data-tone="success"] { color: var(--success); }
+    dl {
+      margin: 0;
+      display: grid;
+      gap: 0;
+    }
+    dl div {
+      min-height: 34px;
+      display: grid;
+      grid-template-columns: 110px minmax(0, 1fr);
+      align-items: center;
+      gap: 10px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      font-size: 0.88rem;
+    }
+    dl div:last-child { border-bottom: 0; }
+    dt { color: var(--muted); }
+    dd {
+      margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+    .note {
+      padding: 12px 14px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      line-height: 1.5;
+      border-top: 1px solid var(--line);
+    }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .workspace { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .shell { width: min(100% - 20px, 1280px); padding-top: 12px; }
+      header { flex-direction: column; }
+      .actions { grid-template-columns: 1fr; }
+      .actions .primary, .actions .download-link { grid-column: auto; }
+      dl div { grid-template-columns: 92px minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <h1>Gemini 视频水印本地处理 MVP</h1>
+        <p>WebCodecs + Mediabunny，文件只在浏览器内解码、逐帧处理、重新封装 MP4。</p>
+      </div>
+      <p>当前范围：右下角 72px Gemini/Veo 风格水印；视频轨重编码，兼容音频轨自动透传。</p>
+    </header>
+
+    <main class="layout">
+      <section class="workspace" aria-label="视频预览">
+        <div class="panel">
+          <div class="panel-head"><span>原视频</span><span id="progressText">等待视频</span></div>
+          <div class="video-box">
+            <video id="originalVideo" controls playsinline></video>
+            <div id="originalEmpty" class="empty">选择或拖入 MP4</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><span>处理后</span><span>MP4</span></div>
+          <div class="video-box">
+            <video id="processedVideo" controls playsinline></video>
+            <div id="processedEmpty" class="empty">导出完成后显示</div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="side" aria-label="处理设置">
+        <div id="dropzone" class="dropzone" data-dragging="false" role="button" tabindex="0">
+          <strong>选择视频</strong>
+          <span class="muted">支持本地 MP4。10 秒 1080p 样例最适合当前 MVP。</span>
+          <input id="fileInput" type="file" accept="video/mp4,video/*" hidden>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">参数</div>
+          <div class="controls">
+            <div class="field">
+              <label for="alphaGain">Alpha 种子 <span id="alphaGainValue">1.00</span></label>
+              <input id="alphaGain" type="range" min="0.25" max="1.35" step="0.05">
+            </div>
+            <label class="check">
+              <input id="adaptiveAlpha" type="checkbox">
+              自适应每帧 Alpha
+            </label>
+            <label class="check">
+              <input id="highQualityCleanup" type="checkbox">
+              实验性边缘去噪
+            </label>
+            <div class="field">
+              <label for="denoiseBackend">后端去噪</label>
+              <select id="denoiseBackend">
+                <option value="none">关闭</option>
+                <option value="canvas-edge-denoise">Canvas 边缘去噪</option>
+                <option value="canvas-edge-band-denoise">Canvas 边缘带去噪</option>
+                <option value="canvas-edge-core-denoise">Canvas 边缘核心去噪</option>
+                <option value="canvas-footprint-polish">Canvas 足迹抛光</option>
+                <option value="canvas-temporal-delta-stabilize">Canvas 时序 Delta 稳定</option>
+                <option value="canvas-temporal-match-delta-stabilize">Canvas 匹配 Delta 稳定（迁移锚点复核）</option>
+                <option value="canvas-temporal-stabilize">Canvas 时序稳定</option>
+                <option value="canvas-texture-repair">Canvas 纹理回填</option>
+              </select>
+            </div>
+            <div class="preset-row">
+              <button id="relocatedReviewPresetBtn" type="button">迁移锚点复核预设</button>
+            </div>
+            <div class="field">
+              <label for="edgeDenoiseStrength">边缘去噪强度 <span id="edgeDenoiseStrengthValue">0.65</span></label>
+              <input id="edgeDenoiseStrength" type="range" min="0" max="1" step="0.05">
+            </div>
+            <div class="field">
+              <label for="residualCleanup">边缘软清理 <span id="residualCleanupValue">1.20</span></label>
+              <input id="residualCleanup" type="range" min="0" max="1.80" step="0.05">
+            </div>
+            <div class="field">
+              <label for="sampleCount">检测抽帧数</label>
+              <input id="sampleCount" type="number" min="4" max="24" step="1">
+            </div>
+            <div class="field">
+              <label for="videoBitrateMbps">导出码率 Mbps</label>
+              <input id="videoBitrateMbps" type="number" min="1" max="80" step="0.5" placeholder="自动">
+            </div>
+            <label class="check">
+              <input id="allowLowConfidence" type="checkbox">
+              允许低置信导出
+            </label>
+            <div class="progress" aria-label="处理进度"><span id="progressBar"></span></div>
+            <div id="status" class="status" data-tone="info"></div>
+            <div class="actions">
+              <button id="detectBtn" type="button">检测</button>
+              <button id="resetBtn" type="button">重置</button>
+              <button id="processBtn" class="primary" type="button">导出无水印视频</button>
+              <a id="downloadBtn" class="download-link" aria-disabled="true">下载结果</a>
+            </div>
+          </div>
+          <div class="note">导出会重新编码视频轨，并在 MP4 支持原音频编码时透传音频轨。若检测显示低置信，先看候选位置和样例是否属于 1920x1080 右下角水印。</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">视频信息</div>
+          <div id="metadata"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">检测结果</div>
+          <div id="detection"></div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="video-app.js"></script>
+</body>
+</html>

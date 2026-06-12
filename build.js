@@ -156,6 +156,8 @@ function cleanDistBuildOutputs() {
     'index.html',
     'tampermonkey-worker-probe.html',
     'tampermonkey-worker-probe.user.js',
+    'video-app.js',
+    'video-preview.html',
     'userscript',
     'workers'
   ]) {
@@ -298,6 +300,16 @@ const websiteCtx = await esbuild.context({
   plugins: [copyAssetsPlugin],
 });
 
+const videoWebsiteCtx = await esbuild.context({
+  ...commonConfig,
+  entryPoints: ['src/video-app.js'],
+  outfile: 'dist/video-app.js',
+  platform: 'browser',
+  target: ['es2022'],
+  banner: { js: jsBanner },
+  sourcemap: !isProd,
+});
+
 // Build website worker
 const workerCtx = await esbuild.context({
   ...commonConfig,
@@ -396,6 +408,7 @@ copyExtensionStaticAssets();
 if (isProd) {
   await Promise.all([
     websiteCtx.rebuild(),
+    videoWebsiteCtx.rebuild(),
     workerCtx.rebuild(),
     userscriptCtx.rebuild(),
     extensionMainCtx.rebuild(),
@@ -409,6 +422,7 @@ if (isProd) {
 } else {
   await Promise.all([
     websiteCtx.watch(),
+    videoWebsiteCtx.watch(),
     workerCtx.watch(),
     userscriptCtx.watch(),
     extensionMainCtx.watch(),

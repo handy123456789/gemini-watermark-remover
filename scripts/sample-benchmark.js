@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
 
 import { calculateAlphaMap } from '../src/core/alphaMap.js';
+import { getEmbeddedAlphaMap } from '../src/core/embeddedAlphaMaps.js';
 import { interpolateAlphaMap } from '../src/core/adaptiveDetector.js';
 import {
     calculateNearBlackRatio,
@@ -305,13 +306,17 @@ function resolveAlphaMapForConfig(config, { alpha48, alpha96, alpha96Variants, g
     if (config?.alphaVariant && config.logoSize === 96 && alpha96Variants?.[config.alphaVariant]) {
         return alpha96Variants[config.alphaVariant];
     }
+    if (config?.alphaVariant && typeof getAlphaMap === 'function') {
+        const variantAlpha = getAlphaMap(`${config.logoSize}-${config.alphaVariant}`);
+        if (variantAlpha) return variantAlpha;
+    }
     if (config?.logoSize === 48) return alpha48;
     if (config?.logoSize === 96) return alpha96;
     return typeof getAlphaMap === 'function' ? getAlphaMap(config.logoSize) : null;
 }
 
 function describeAlphaMapProfile(config) {
-    if (config?.alphaVariant) return `96-${config.alphaVariant}`;
+    if (config?.alphaVariant) return `${config.logoSize}-${config.alphaVariant}`;
     if (config?.logoSize === 48) return '48-current';
     if (config?.logoSize === 96) return '96-current';
     return `${config?.logoSize ?? 'unknown'}-interpolated`;
@@ -1097,6 +1102,7 @@ async function buildBenchmarkReport({
     const alpha96 = calculateAlphaMap(await decodeImageDataInNode(bg96Path));
     const alpha96NewMargin = calculateAlphaMap(await decodeImageDataInNode(bg96NewMarginPath));
     const alphaResolver = (size) => {
+        if (size === '36-v2') return getEmbeddedAlphaMap('36-v2');
         if (size === 48) return alpha48;
         if (size === 96) return alpha96;
         return interpolateAlphaMap(alpha96, 96, size);
@@ -1184,6 +1190,7 @@ async function buildBenchmarkReport({
             originalSpatialScore: toFiniteNumber(processed.meta.detection?.originalSpatialScore),
             suppressionGain: toFiniteNumber(processed.meta.detection?.suppressionGain),
             adaptiveConfidence: toFiniteNumber(processed.meta.detection?.adaptiveConfidence),
+            residualVisibility: processed.meta.detection?.residualVisibility ?? null,
             changedRatio: regionDelta.changedRatio,
             avgAbsoluteDeltaPerChannel: regionDelta.avgAbsoluteDeltaPerChannel,
             selectionDebug: processed.meta.selectionDebug ?? null,

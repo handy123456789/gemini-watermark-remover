@@ -40,6 +40,18 @@ const VALIDATION_MIN_CONFIDENCE_FOR_ADAPTIVE_TRIAL = 0.25;
 const STANDARD_FAST_PATH_RESIDUAL_THRESHOLD = 0.22;
 const STANDARD_FAST_PATH_GRADIENT_THRESHOLD = 0.08;
 const FIXED_CORE_MAX_ACCEPTED_SPATIAL_RESIDUAL = 0.45;
+const FIXED_CORE_STRONG_96_MAX_NEGATIVE_SPATIAL_RESIDUAL = 0.52;
+const FIXED_CORE_STRONG_96_MIN_ORIGINAL_SPATIAL_SCORE = 0.95;
+const FIXED_CORE_STRONG_96_MIN_ORIGINAL_GRADIENT_SCORE = 0.9;
+const FIXED_CORE_STRONG_96_MAX_PROCESSED_GRADIENT_SCORE = 0.16;
+const FIXED_CORE_STRONG_96_MIN_IMPROVEMENT = 0.45;
+const FIXED_CORE_STRONG_96_MAX_TEXTURE = 0.05;
+const FIXED_CORE_STRONG_96_MAX_NEAR_BLACK_INCREASE = 0.02;
+const FIXED_CORE_STRONG_96_LOW_RESIDUAL_MIN_ORIGINAL_SPATIAL_SCORE = 0.55;
+const FIXED_CORE_STRONG_96_LOW_RESIDUAL_MIN_ORIGINAL_GRADIENT_SCORE = 0.5;
+const FIXED_CORE_STRONG_96_LOW_RESIDUAL_MAX_SPATIAL_SCORE = 0.08;
+const FIXED_CORE_STRONG_96_LOW_RESIDUAL_MAX_GRADIENT_SCORE = 0.24;
+const FIXED_CORE_STRONG_96_LOW_RESIDUAL_MIN_IMPROVEMENT = 0.6;
 const STANDARD_EXPAND_CATALOG_MIN_ORIGINAL_GRADIENT = 0.12;
 const WEAK_ALPHA_PRIORITY_CLEAN_GRADIENT_THRESHOLD = 0.12;
 const STRONG_ORIGINAL_SIGNAL_SPATIAL_ADVANTAGE = 0.2;
@@ -81,6 +93,14 @@ const STANDARD_VISIBLE_CATALOG_MAX_SPATIAL_RESIDUAL = 0.35;
 const STANDARD_VISIBLE_CATALOG_MAX_GRADIENT_RESIDUAL = 0.18;
 const STANDARD_VISIBLE_CATALOG_MIN_IMPROVEMENT = 0.7;
 const STANDARD_VISIBLE_CATALOG_MAX_NEAR_BLACK_INCREASE = 0.05;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_SPATIAL_SCORE = 0.9;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_GRADIENT_SCORE = 0.7;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_RESIDUAL = 0.16;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_GRADIENT = 0.16;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_IMPROVEMENT = 0.9;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_GRADIENT_DROP = 0.6;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_NEAR_BLACK_INCREASE = 0.01;
+const STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_TEXTURE = 0.1;
 const STANDARD_HARD_REJECT_OVERRIDE_MIN_SPATIAL_SCORE = 0.9;
 const STANDARD_HARD_REJECT_OVERRIDE_MIN_GRADIENT_SCORE = 0.7;
 const STANDARD_HARD_REJECT_OVERRIDE_MAX_RESIDUAL = 0.08;
@@ -334,6 +354,10 @@ function resolveAlphaMapForConfig(config, {
     if (config.alphaVariant && config.logoSize === 96 && alpha96Variants) {
         return alpha96Variants[config.alphaVariant] ?? null;
     }
+    if (config.alphaVariant && typeof getAlphaMap === 'function') {
+        const variantAlpha = getAlphaMap(`${config.logoSize}-${config.alphaVariant}`);
+        if (variantAlpha) return variantAlpha;
+    }
     return typeof resolveAlphaMap === 'function'
         ? resolveAlphaMap(config.logoSize)
         : resolveAlphaMapForSize(config.logoSize, {
@@ -381,7 +405,54 @@ function isStrictFixedCoreCandidate(candidate) {
     const processedSpatial = Number(candidate.processedSpatialScore);
     if (!Number.isFinite(processedSpatial)) return false;
 
-    return Math.abs(processedSpatial) <= FIXED_CORE_MAX_ACCEPTED_SPATIAL_RESIDUAL;
+    if (Math.abs(processedSpatial) <= FIXED_CORE_MAX_ACCEPTED_SPATIAL_RESIDUAL) {
+        return true;
+    }
+
+    const originalSpatial = Number(candidate.originalSpatialScore);
+    const originalGradient = Number(candidate.originalGradientScore);
+    const processedGradient = Number(candidate.processedGradientScore);
+    const improvement = Number(candidate.improvement);
+    const texturePenalty = Number(candidate.texturePenalty);
+    const nearBlackIncrease = Number(candidate.nearBlackIncrease);
+    if (
+        !Number.isFinite(originalSpatial) ||
+        !Number.isFinite(originalGradient) ||
+        !Number.isFinite(processedGradient) ||
+        !Number.isFinite(improvement) ||
+        !Number.isFinite(texturePenalty) ||
+        !Number.isFinite(nearBlackIncrease)
+    ) {
+        return false;
+    }
+
+    const isStrongStandard96 =
+        candidate.config?.logoSize === 96 &&
+        isStandardCandidateSource(candidate) &&
+        candidate.provenance?.localShift !== true &&
+        candidate.provenance?.sizeJitter !== true &&
+        candidate.provenance?.previewAnchor !== true;
+    if (!isStrongStandard96 || candidate.hardReject === true) return false;
+
+    const boundedNegativeOvershoot =
+        processedSpatial < 0 &&
+        Math.abs(processedSpatial) <= FIXED_CORE_STRONG_96_MAX_NEGATIVE_SPATIAL_RESIDUAL &&
+        originalSpatial >= FIXED_CORE_STRONG_96_MIN_ORIGINAL_SPATIAL_SCORE &&
+        originalGradient >= FIXED_CORE_STRONG_96_MIN_ORIGINAL_GRADIENT_SCORE &&
+        processedGradient <= FIXED_CORE_STRONG_96_MAX_PROCESSED_GRADIENT_SCORE &&
+        improvement >= FIXED_CORE_STRONG_96_MIN_IMPROVEMENT &&
+        texturePenalty <= FIXED_CORE_STRONG_96_MAX_TEXTURE &&
+        nearBlackIncrease <= FIXED_CORE_STRONG_96_MAX_NEAR_BLACK_INCREASE;
+    const strongLowResidualFullAnchor =
+        Math.abs(processedSpatial) <= FIXED_CORE_STRONG_96_LOW_RESIDUAL_MAX_SPATIAL_SCORE &&
+        processedGradient <= FIXED_CORE_STRONG_96_LOW_RESIDUAL_MAX_GRADIENT_SCORE &&
+        originalSpatial >= FIXED_CORE_STRONG_96_LOW_RESIDUAL_MIN_ORIGINAL_SPATIAL_SCORE &&
+        originalGradient >= FIXED_CORE_STRONG_96_LOW_RESIDUAL_MIN_ORIGINAL_GRADIENT_SCORE &&
+        improvement >= FIXED_CORE_STRONG_96_LOW_RESIDUAL_MIN_IMPROVEMENT &&
+        texturePenalty <= FIXED_CORE_STRONG_96_MAX_TEXTURE &&
+        nearBlackIncrease <= FIXED_CORE_STRONG_96_MAX_NEAR_BLACK_INCREASE;
+
+    return boundedNegativeOvershoot || strongLowResidualFullAnchor;
 }
 
 function isCleanWeakAlphaPriorityCandidate(candidate) {
@@ -683,13 +754,36 @@ export function evaluateRestorationCandidate({
         processedScores.gradientScore <= STANDARD_VISIBLE_CATALOG_MAX_GRADIENT_RESIDUAL &&
         improvement >= STANDARD_VISIBLE_CATALOG_MIN_IMPROVEMENT &&
         nearBlackIncrease <= STANDARD_VISIBLE_CATALOG_MAX_NEAR_BLACK_INCREASE;
+    const newMarginAlphaHardRejectAllowed =
+        textureAssessment.hardReject === true &&
+        isNewMarginAlphaVariantTrial({ config, provenance }) &&
+        alphaGain === 1 &&
+        originalScores.spatialScore >= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_SPATIAL_SCORE &&
+        originalScores.gradientScore >= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_GRADIENT_SCORE &&
+        Math.abs(processedScores.spatialScore) <= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_RESIDUAL &&
+        processedScores.gradientScore <= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_GRADIENT &&
+        improvement >= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_IMPROVEMENT &&
+        gradientDrop >= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MIN_GRADIENT_DROP &&
+        nearBlackIncrease <= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_NEAR_BLACK_INCREASE &&
+        texturePenalty <= STANDARD_NEW_MARGIN_ALPHA_OVERRIDE_MAX_TEXTURE;
     const originalEvidenceAllowed =
         !isStandardCandidateSource({ source }) ||
         originalScores.spatialScore >= STANDARD_VALIDATION_MIN_ORIGINAL_SPATIAL_SCORE ||
         originalScores.gradientScore >= STANDARD_VALIDATION_MIN_ORIGINAL_GRADIENT_SCORE;
+    const catalogEvidenceGate = provenance?.catalogEvidenceGate ?? null;
+    const catalogEvidenceAllowed =
+        catalogEvidenceGate !== 'medium' ||
+        originalScores.spatialScore >= 0.15 ||
+        originalScores.gradientScore >= 0.08;
     const accepted =
         originalEvidenceAllowed &&
-        (hardRejectAllowed || conservativeCatalogHardRejectAllowed || visibleCatalogHardRejectAllowed) &&
+        catalogEvidenceAllowed &&
+        (
+            hardRejectAllowed ||
+            conservativeCatalogHardRejectAllowed ||
+            visibleCatalogHardRejectAllowed ||
+            newMarginAlphaHardRejectAllowed
+        ) &&
         nearBlackIncreaseAllowed &&
         improvement >= VALIDATION_MIN_IMPROVEMENT &&
         (
@@ -712,8 +806,12 @@ export function evaluateRestorationCandidate({
         processedGradient: processedScores.gradientScore,
         suppressionGain: improvement
     });
+    const hardRejectBypassed =
+        conservativeCatalogHardRejectAllowed ||
+        visibleCatalogHardRejectAllowed ||
+        newMarginAlphaHardRejectAllowed;
     const damage = scoreDamage({
-        hardReject: textureAssessment.hardReject,
+        hardReject: textureAssessment.hardReject === true && !hardRejectBypassed,
         nearBlackIncrease,
         texturePenalty
     });
@@ -783,7 +881,11 @@ function pickBestValidatedCandidate(candidates) {
         return b.improvement - a.improvement;
     });
 
-    return accepted[0];
+    const validationBest = accepted[0];
+    const preservedStrongCanonical96 = accepted.find((candidate) => (
+        shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(candidate, validationBest)
+    ));
+    return preservedStrongCanonical96 ?? validationBest;
 }
 
 function createCandidateRegionImageData({
@@ -871,6 +973,12 @@ export function pickBetterCandidate(currentBest, candidate, minCostDelta = 0.005
     if (!currentBest) return candidate;
     if (shouldPreserveCatalogOriginalSignal(currentBest, candidate)) {
         return currentBest;
+    }
+    if (shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(currentBest, candidate)) {
+        return currentBest;
+    }
+    if (shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(candidate, currentBest)) {
+        return candidate;
     }
     if (shouldPreferCatalogOriginalSignal(candidate, currentBest)) {
         return candidate;
@@ -965,7 +1073,11 @@ function isCatalogVariantCandidate(candidate) {
 
 function isCurrentLargeMarginCatalogCandidate(candidate) {
     return isCatalogVariantCandidate(candidate) &&
-        candidate?.config?.logoSize === 48 &&
+        isCurrentLargeMarginCandidate(candidate);
+}
+
+function isCurrentLargeMarginCandidate(candidate) {
+    return candidate?.config?.logoSize === 48 &&
         candidate.config.marginRight === 96 &&
         candidate.config.marginBottom === 96;
 }
@@ -975,7 +1087,7 @@ function isPreviewAnchorCandidate(candidate) {
 }
 
 function shouldPreferCatalogOriginalSignal(candidate, currentBest) {
-    if (!isCurrentLargeMarginCatalogCandidate(candidate)) return false;
+    if (!isCurrentLargeMarginCandidate(candidate)) return false;
     if (currentBest?.provenance?.localShift === true || currentBest?.provenance?.sizeJitter === true) {
         return false;
     }
@@ -986,13 +1098,11 @@ function shouldPreferCatalogOriginalSignal(candidate, currentBest) {
 
     return candidateReliable &&
         currentReliable &&
-        isPreviewAnchorCandidate(currentBest) &&
         hasMuchStrongerOriginalSignal(candidate, currentBest);
 }
 
 function shouldPreserveCatalogOriginalSignal(currentBest, candidate) {
-    if (!isCurrentLargeMarginCatalogCandidate(currentBest)) return false;
-    if (!isPreviewAnchorCandidate(candidate)) return false;
+    if (!isCurrentLargeMarginCandidate(currentBest)) return false;
 
     const currentReliable = hasReliableCandidateOriginalSignal(currentBest);
     const candidateReliable = hasReliableCandidateOriginalSignal(candidate);
@@ -1001,6 +1111,67 @@ function shouldPreserveCatalogOriginalSignal(currentBest, candidate) {
     return currentReliable &&
         candidateReliable &&
         hasMuchStrongerOriginalSignal(currentBest, candidate);
+}
+
+function isCanonicalDefault96Candidate(candidate) {
+    return isStandardCandidateSource(candidate) &&
+        candidate?.provenance?.catalogVariant !== true &&
+        candidate?.provenance?.localShift !== true &&
+        candidate?.provenance?.sizeJitter !== true &&
+        candidate?.provenance?.previewAnchor !== true &&
+        candidate?.config?.logoSize === 96 &&
+        candidate.config.marginRight === 64 &&
+        candidate.config.marginBottom === 64;
+}
+
+function isDefault96GeometryCandidate(candidate) {
+    return isStandardCandidateSource(candidate) &&
+        candidate?.provenance?.localShift !== true &&
+        candidate?.provenance?.sizeJitter !== true &&
+        candidate?.provenance?.previewAnchor !== true &&
+        candidate?.config?.logoSize === 96 &&
+        candidate.config.marginRight === 64 &&
+        candidate.config.marginBottom === 64;
+}
+
+function shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(currentBest, candidate) {
+    if (!isCanonicalDefault96Candidate(currentBest)) return false;
+    if (!isCurrentLargeMarginCatalogCandidate(candidate)) return false;
+
+    const currentSpatial = Number(currentBest.originalSpatialScore);
+    const currentGradient = Number(currentBest.originalGradientScore);
+    const currentProcessedSpatial = Number(currentBest.processedSpatialScore);
+    const currentProcessedGradient = Number(currentBest.processedGradientScore);
+    const candidateSpatial = Number(candidate.originalSpatialScore);
+    const candidateGradient = Number(candidate.originalGradientScore);
+    if (
+        !Number.isFinite(currentSpatial) ||
+        !Number.isFinite(currentGradient) ||
+        !Number.isFinite(currentProcessedSpatial) ||
+        !Number.isFinite(currentProcessedGradient) ||
+        !Number.isFinite(candidateSpatial) ||
+        !Number.isFinite(candidateGradient)
+    ) {
+        return false;
+    }
+
+    const currentAlreadyCleared = currentBest.residual?.cleared === true;
+    const currentStrongLowResidual =
+        currentSpatial >= 0.55 &&
+        currentGradient >= 0.5 &&
+        Math.abs(currentProcessedSpatial) <= 0.08 &&
+        currentProcessedGradient <= 0.24;
+    const candidateHasWeakOriginalSignal =
+        candidateGradient < STANDARD_VALIDATION_MIN_ORIGINAL_GRADIENT_SCORE ||
+        (
+            candidateSpatial <= currentSpatial - 0.2 &&
+            candidateGradient <= currentGradient - 0.3
+        );
+
+    return currentSpatial >= 0.4 &&
+        currentGradient >= 0.2 &&
+        (currentAlreadyCleared || currentStrongLowResidual) &&
+        candidateHasWeakOriginalSignal;
 }
 
 function hasWeakDriftEvidence(candidate) {
@@ -1600,9 +1771,38 @@ function searchStrongStandardTrialAlphaGain({
     };
 }
 
+function searchFixedCoreStrongStandardAlphaGain({
+    originalImageData,
+    baseCandidate,
+    alphaGainCandidates
+}) {
+    if (!isCanonicalDefault96Candidate(baseCandidate)) return null;
+    if (!hasReliableCandidateOriginalSignal(baseCandidate)) return null;
+
+    let bestCandidate = null;
+    const baselineNearBlackRatio = calculateNearBlackRatio(originalImageData, baseCandidate.position);
+    for (const candidateGain of alphaGainCandidates) {
+        if (!Number.isFinite(candidateGain) || candidateGain <= 0 || candidateGain === 1) continue;
+        const candidate = evaluateRestorationCandidate({
+            originalImageData,
+            alphaMap: baseCandidate.alphaMap,
+            position: baseCandidate.position,
+            source: `${baseCandidate.source}+gain`,
+            config: baseCandidate.config,
+            baselineNearBlackRatio,
+            alphaGain: candidateGain,
+            provenance: baseCandidate.provenance,
+            includeImageData: false
+        });
+        if (!candidate?.accepted || !isStrictFixedCoreCandidate(candidate)) continue;
+        bestCandidate = pickBetterCandidate(bestCandidate, candidate, 0.002);
+    }
+
+    return bestCandidate;
+}
+
 function isNewMarginAlphaVariantTrial(candidate) {
-    return isCatalogVariantCandidate(candidate) &&
-        candidate?.config?.logoSize === 96 &&
+    return candidate?.config?.logoSize === 96 &&
         candidate.config.marginRight === 192 &&
         candidate.config.marginBottom === 192 &&
         candidate.config.alphaVariant === '20260520';
@@ -1864,8 +2064,13 @@ function resolveStandardAnchorSelection({
         alphaPriorityGains
     });
 
+    const shouldSearchCatalogRescue =
+        standardSelection.standardTrial &&
+        !standardSelection.standardTrial.accepted &&
+        shouldEscalateSearch(standardSelection.standardTrial);
     const shouldExpandStandardCatalog =
         forceCatalogVariants ||
+        shouldSearchCatalogRescue ||
         !standardSelection.hasReliableStandardMatch &&
         (
             !standardSelection.standardTrial ||
@@ -2397,7 +2602,10 @@ export function selectInitialCandidate({
     }
 
     if (!baseCandidate) {
-        const validatedCandidate = pickBestValidatedCandidate([standardTrial, adaptiveTrial]);
+        const validatedCandidate = pickBestValidatedCandidate([
+            ...standardTrials,
+            adaptiveTrial
+        ]);
         if (!validatedCandidate) {
             const fixedCoreLocalGeometryCandidate = !allowAutomaticSearch
                 ? searchFixedCoreLocalGeometryCandidate({
@@ -2439,30 +2647,73 @@ export function selectInitialCandidate({
         baseDecisionTier = hasReliableStandardMatch ? 'direct-match' : 'validated-match';
     }
 
-    if (!allowAutomaticSearch && !isStrictFixedCoreCandidate(baseCandidate)) {
-        const bestEffortCandidate = searchBestEffortCurrentLargeMarginWeakAlpha({
+    if (!allowAutomaticSearch && isCurrentLargeMarginCatalogCandidate(baseCandidate)) {
+        const initialCanonical96Candidate = (
+            config?.logoSize === 96 &&
+            config.marginRight === 64 &&
+            config.marginBottom === 64 &&
+            fallbackAlphaMap
+        )
+            ? evaluateRestorationCandidate({
+                originalImageData,
+                alphaMap: fallbackAlphaMap,
+                position,
+                source: 'standard',
+                config,
+                baselineNearBlackRatio: calculateNearBlackRatio(originalImageData, position),
+                alphaGain: 1,
+                provenance: null,
+                includeImageData: false
+            })
+            : null;
+        const fixedCoreCanonical96Candidate = searchFixedCoreStrongStandardAlphaGain({
             originalImageData,
-            standardTrials,
+            baseCandidate: initialCanonical96Candidate,
             alphaGainCandidates
         });
-        if (bestEffortCandidate) {
-            baseCandidate = bestEffortCandidate;
+        if (shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(fixedCoreCanonical96Candidate, baseCandidate)) {
+            baseCandidate = fixedCoreCanonical96Candidate;
+            baseDecisionTier = 'direct-match';
+        }
+    }
+
+    if (!allowAutomaticSearch && !isStrictFixedCoreCandidate(baseCandidate)) {
+        const fixedCoreStrongAlphaGainCandidate = searchFixedCoreStrongStandardAlphaGain({
+            originalImageData,
+            baseCandidate,
+            alphaGainCandidates
+        });
+        if (fixedCoreStrongAlphaGainCandidate) {
+            baseCandidate = fixedCoreStrongAlphaGainCandidate;
             baseDecisionTier = 'direct-match';
         } else {
-            const fixedCoreLocalGeometryCandidate = searchFixedCoreLocalGeometryCandidate({
+            const bestEffortCandidate = searchBestEffortCurrentLargeMarginWeakAlpha({
                 originalImageData,
-                candidateSeeds: standardCandidateSeeds,
-                resolveAlphaMap,
+                standardTrials,
                 alphaGainCandidates
             });
-            baseCandidate = fixedCoreLocalGeometryCandidate;
-            baseDecisionTier = fixedCoreLocalGeometryCandidate ? 'direct-match' : 'insufficient';
+            if (bestEffortCandidate) {
+                baseCandidate = bestEffortCandidate;
+                baseDecisionTier = 'direct-match';
+            } else {
+                const fixedCoreLocalGeometryCandidate = searchFixedCoreLocalGeometryCandidate({
+                    originalImageData,
+                    candidateSeeds: standardCandidateSeeds,
+                    resolveAlphaMap,
+                    alphaGainCandidates
+                });
+                baseCandidate = fixedCoreLocalGeometryCandidate;
+                baseDecisionTier = fixedCoreLocalGeometryCandidate ? 'direct-match' : 'insufficient';
+            }
         }
     }
 
     if (!baseCandidate) {
         const validatedCandidate = allowAutomaticSearch
-            ? pickBestValidatedCandidate([standardTrial, adaptiveTrial])
+            ? pickBestValidatedCandidate([
+                ...standardTrials,
+                adaptiveTrial
+            ])
             : null;
         if (!validatedCandidate) {
             const fixedCoreLocalGeometryCandidate = !allowAutomaticSearch
@@ -2497,6 +2748,51 @@ export function selectInitialCandidate({
                 source: `${validatedCandidate.source}+validated`
             };
             baseDecisionTier = 'validated-match';
+        }
+    }
+
+    if (isCurrentLargeMarginCatalogCandidate(baseCandidate)) {
+        const initialCanonical96Seed = (
+            config?.logoSize === 96 &&
+            config.marginRight === 64 &&
+            config.marginBottom === 64 &&
+            fallbackAlphaMap
+        )
+            ? evaluateRestorationCandidate({
+                originalImageData,
+                alphaMap: fallbackAlphaMap,
+                position,
+                source: 'standard',
+                config,
+                baselineNearBlackRatio: calculateNearBlackRatio(originalImageData, position),
+                alphaGain: 1,
+                provenance: null,
+                includeImageData: false
+            })
+            : null;
+        const rawCanonical96Seed =
+            standardTrials.find((candidate) => isCanonicalDefault96Candidate(candidate)) ??
+            (isCanonicalDefault96Candidate(standardTrial) ? standardTrial : null) ??
+            standardTrials.find((candidate) => isDefault96GeometryCandidate(candidate)) ??
+            (isDefault96GeometryCandidate(standardTrial) ? standardTrial : null) ??
+            initialCanonical96Seed;
+        const canonical96Seed = rawCanonical96Seed && !isCanonicalDefault96Candidate(rawCanonical96Seed)
+            ? {
+                ...rawCanonical96Seed,
+                source: 'standard',
+                provenance: null
+            }
+            : rawCanonical96Seed;
+        const strictCanonical96Candidate = isStrictFixedCoreCandidate(canonical96Seed)
+            ? canonical96Seed
+            : searchFixedCoreStrongStandardAlphaGain({
+                originalImageData,
+                baseCandidate: canonical96Seed,
+                alphaGainCandidates
+            });
+        if (shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(strictCanonical96Candidate, baseCandidate)) {
+            baseCandidate = strictCanonical96Candidate;
+            baseDecisionTier = 'direct-match';
         }
     }
 

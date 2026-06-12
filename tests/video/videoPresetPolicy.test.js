@@ -1,0 +1,52 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+    getRelocatedReviewPresetConfig,
+    isRelocatedVideoWatermarkPosition,
+    shouldUseRelocatedReviewPreset
+} from '../../src/video/videoPresetPolicy.js';
+import { VIDEO_DENOISE_BACKENDS } from '../../src/video/videoCleanupBackends.js';
+
+test('isRelocatedVideoWatermarkPosition should identify inset video anchors', () => {
+    assert.equal(isRelocatedVideoWatermarkPosition({
+        width: 72,
+        marginRight: 144,
+        marginBottom: 144
+    }), true);
+    assert.equal(isRelocatedVideoWatermarkPosition({
+        width: 72,
+        marginRight: 108,
+        marginBottom: 108
+    }), false);
+    assert.equal(isRelocatedVideoWatermarkPosition({
+        x: 1704,
+        y: 864,
+        width: 72,
+        height: 72,
+        videoWidth: 1920,
+        videoHeight: 1080
+    }), true);
+});
+
+test('shouldUseRelocatedReviewPreset should require confident relocated detection', () => {
+    const position = { width: 72, marginRight: 144, marginBottom: 144 };
+
+    assert.equal(shouldUseRelocatedReviewPreset({ isConfident: true, position }), true);
+    assert.equal(shouldUseRelocatedReviewPreset({ isConfident: false, position }), false);
+    assert.equal(shouldUseRelocatedReviewPreset({ isConfident: true, position: null }), false);
+    assert.equal(shouldUseRelocatedReviewPreset({
+        isConfident: true,
+        position: { x: 1704, y: 864, width: 72, height: 72 },
+        summary: { best: { id: 'veo-1080p-inset', label: '1080p inset, 72px, margin 144' } }
+    }, { width: 1920, height: 1080 }), true);
+});
+
+test('getRelocatedReviewPresetConfig should match the reviewed human-review candidate', () => {
+    assert.deepEqual(getRelocatedReviewPresetConfig(), {
+        denoiseBackend: VIDEO_DENOISE_BACKENDS.CANVAS_TEMPORAL_MATCH_DELTA_STABILIZE,
+        edgeDenoiseStrength: 0.25,
+        videoBitrateMbps: 12,
+        allowLowConfidence: true
+    });
+});

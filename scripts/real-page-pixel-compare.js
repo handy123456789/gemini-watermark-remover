@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 
 import { calculateAlphaMap } from '../src/core/alphaMap.js';
+import { getEmbeddedAlphaMap } from '../src/core/embeddedAlphaMaps.js';
 import {
   computeRegionGradientCorrelation,
   computeRegionSpatialCorrelation,
@@ -325,7 +326,9 @@ export async function runRealPagePixelCompare({
       alpha96,
       adaptiveMode: 'never',
       debugTimings: true,
-      getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
+      getAlphaMap: (size) => size === '36-v2'
+        ? getEmbeddedAlphaMap('36-v2')
+        : interpolateAlphaMap(alpha96, 96, size)
     });
     const position = processed.meta.position;
     const alphaMap = interpolateAlphaMap(alpha96, 96, position.width);

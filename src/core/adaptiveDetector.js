@@ -7,6 +7,8 @@ import { resolveGeminiWatermarkSearchConfigs } from './geminiSizeCatalog.js';
 
 const DEFAULT_THRESHOLD = 0.35;
 const EPSILON = 1e-8;
+const REFERENCE_WATERMARK_SIZE = 96;
+const MIN_COARSE_ADJUSTED_SCORE = 0.08;
 
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 
@@ -170,6 +172,23 @@ function createScaleList(minSize, maxSize) {
     if (48 >= minSize && 48 <= maxSize) set.add(48);
     if (96 >= minSize && 96 <= maxSize) set.add(96);
     return [...set].sort((a, b) => a - b);
+}
+
+export function computeSizeAdjustedConfidence(confidence, size, referenceSize = REFERENCE_WATERMARK_SIZE) {
+    if (
+        !Number.isFinite(confidence) ||
+        !Number.isFinite(size) ||
+        !Number.isFinite(referenceSize) ||
+        size <= 0 ||
+        referenceSize <= 0
+    ) {
+        return 0;
+    }
+
+    // NCC tends to favor tiny templates. A cube-root penalty keeps that bias in
+    // check without crushing legitimate preview-tier watermarks.
+    const sizeWeight = Math.min(1, Math.cbrt(size / referenceSize));
+    return confidence * sizeWeight;
 }
 
 function buildSeedConfigs(width, height, defaultConfig) {
@@ -407,7 +426,7 @@ export function detectAdaptiveWatermarkRegion({
             size: seedCandidate.size,
             x: seedCandidate.x,
             y: seedCandidate.y,
-            adjustedScore: seedCandidate.confidence * Math.min(1, Math.sqrt(seedCandidate.size / 96))
+            adjustedScore: computeSizeAdjustedConfidence(seedCandidate.confidence, seedCandidate.size)
         });
     }
 
@@ -424,8 +443,8 @@ export function detectAdaptiveWatermarkRegion({
                 if (!score) continue;
 
                 // Prefer sizes close to known watermark scales to avoid tiny-template bias.
-                const adjustedScore = score.confidence * Math.min(1, Math.sqrt(size / 96));
-                if (adjustedScore < 0.08) continue;
+                const adjustedScore = computeSizeAdjustedConfidence(score.confidence, size);
+                if (adjustedScore < MIN_COARSE_ADJUSTED_SCORE) continue;
 
                 pushTopK({
                     size,

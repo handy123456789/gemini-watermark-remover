@@ -15,9 +15,7 @@ Run these locally from the repo root:
 
 ```bash
 pnpm install
-pnpm test
-pnpm build
-pnpm package:extension
+pnpm release:preflight
 ```
 
 Expected result:
@@ -28,6 +26,13 @@ Expected result:
 - package/sdk entrypoints in `package.json` still match the published source layout
 - generated userscript metadata uses the current `package.json` version
 - Chrome extension release zip, sha256 file, and `latest-extension.json` are regenerated in `release/` for GitHub Release and manual fallback installs
+- allenk V2 comparison reports `current-gap-known`
+- `pnpm release:preflight` runs `pnpm test`, `pnpm build`, `pnpm package:extension`, `pnpm release:quality-gate`, and `pnpm release:goal-audit -- --fail-on-incomplete` in order
+- `pnpm release:quality-gate` runs `pnpm compare:allenk-v2 -- --fail-on-incomplete` before `pnpm release:readiness -- --fail-on-not-ready`
+- `pnpm release:goal-audit` reports `goal achieved: yes` for the scoped RC objective
+- broader video quality claims remain blocked unless the video gates are promoted
+- release readiness reports `rc-current-image-defaults-with-scoped-claims` before publishing a scoped image RC
+- release notes follow the `Release Claim Matrix`: publish only `allowed`, `allowed-scoped`, or `allowed-safety-only` rows, and keep `review-only`, `experiment-only`, and `forbidden` rows out of public capability claims
 - the unpacked extension in `dist/extension` is a local test build; the official release manifest is written only into the zip in `release/`
 
 ## Release Metadata

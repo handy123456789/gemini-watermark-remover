@@ -19,6 +19,13 @@ const DIFF_CLIP_CANDIDATE_THRESHOLD = 0;
 const RECOMPOSE_MAX_ALPHA = 0.99;
 const DIFF_DARK_HALO_VISUAL_WEIGHT = 0.004;
 const DIFF_NEW_CLIP_VISUAL_WEIGHT = 0.5;
+const RESIDUAL_VISIBILITY_CORE_MIN_ALPHA = 0.18;
+const RESIDUAL_VISIBILITY_CORE_MAX_ALPHA = 0.35;
+const RESIDUAL_VISIBILITY_OUTSIDE_ALPHA_MAX = 0.012;
+const RESIDUAL_VISIBILITY_OUTER_MARGIN = 4;
+const RESIDUAL_VISIBILITY_POSITIVE_HALO_LUM_THRESHOLD = 6;
+const RESIDUAL_VISIBILITY_GRADIENT_THRESHOLD = 0.22;
+const RESIDUAL_VISIBILITY_SPATIAL_THRESHOLD = 0.18;
 
 function meanAndVariance(values) {
     let sum = 0;
@@ -312,6 +319,43 @@ export function assessRemovalDiffArtifacts({
         newlyClippedRatio,
         halo,
         visualArtifactCost
+    };
+}
+
+export function assessWatermarkResidualVisibility({
+    imageData,
+    position,
+    alphaMap
+}) {
+    if (!imageData || !position || !alphaMap) return null;
+
+    const scores = scoreRegion(imageData, alphaMap, position);
+    const halo = assessAlphaBandHalo({
+        imageData,
+        position,
+        alphaMap,
+        minAlpha: RESIDUAL_VISIBILITY_CORE_MIN_ALPHA,
+        maxAlpha: RESIDUAL_VISIBILITY_CORE_MAX_ALPHA,
+        outsideAlphaMax: RESIDUAL_VISIBILITY_OUTSIDE_ALPHA_MAX,
+        outerMargin: RESIDUAL_VISIBILITY_OUTER_MARGIN
+    });
+    const positiveHaloLum = Math.max(0, halo.deltaLum);
+    const gradientResidual = Math.max(0, scores.gradientScore);
+    const spatialResidual = Math.abs(scores.spatialScore);
+    const visiblePositiveHalo = positiveHaloLum >= RESIDUAL_VISIBILITY_POSITIVE_HALO_LUM_THRESHOLD;
+    const visibleGradientResidual = gradientResidual >= RESIDUAL_VISIBILITY_GRADIENT_THRESHOLD;
+    const visibleSpatialResidual = spatialResidual >= RESIDUAL_VISIBILITY_SPATIAL_THRESHOLD;
+
+    return {
+        visible: visiblePositiveHalo || visibleGradientResidual || visibleSpatialResidual,
+        positiveHaloLum,
+        haloVisibility: halo.visibility,
+        spatialResidual,
+        gradientResidual,
+        visiblePositiveHalo,
+        visibleGradientResidual,
+        visibleSpatialResidual,
+        halo
     };
 }
 

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { access } from 'node:fs/promises';
 
 import { calculateAlphaMap } from '../../src/core/alphaMap.js';
+import { getEmbeddedAlphaMap } from '../../src/core/embeddedAlphaMaps.js';
 import { processWatermarkImageData } from '../../src/core/watermarkProcessor.js';
 import { interpolateAlphaMap, warpAlphaMap, computeRegionSpatialCorrelation } from '../../src/core/adaptiveDetector.js';
 import { decodeImageDataInNode } from '../../scripts/sample-benchmark.js';
@@ -81,6 +82,77 @@ test('processWatermarkImageData should not use template warp in fixed-core mode'
 
     assert.equal(result.meta.templateWarp, null);
     assert.ok(!String(result.meta.source).includes('+warp'), `source=${result.meta.source}`);
+});
+
+test('processWatermarkImageData should select the evidence-gated allenk V2 36px profile on official 1K outputs', () => {
+    const alpha48 = getEmbeddedAlphaMap(48);
+    const alpha96 = getEmbeddedAlphaMap(96);
+    const alpha36V2 = getEmbeddedAlphaMap('36-v2');
+    const imageData = createPatternImageData(1376, 768);
+    const position = {
+        x: 1376 - 96 - 36,
+        y: 768 - 96 - 36,
+        width: 36,
+        height: 36
+    };
+    applySyntheticWatermark(imageData, alpha36V2, position, 1);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        getAlphaMap: (size) => size === '36-v2'
+            ? alpha36V2
+            : (size === 48 ? alpha48 : (size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)))
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, {
+        logoSize: 36,
+        marginRight: 96,
+        marginBottom: 96,
+        alphaVariant: 'v2'
+    });
+    assert.equal(result.meta.detection.processedSpatialScore < 0.12, true);
+});
+
+test('processWatermarkImageData should cleanup residual edges on allenk V2 36px catalog anchors', async () => {
+    const alpha48 = getEmbeddedAlphaMap(48);
+    const alpha96 = getEmbeddedAlphaMap(96);
+    const alpha36V2 = getEmbeddedAlphaMap('36-v2');
+    const imageData = await decodeImageDataInNode(path.resolve('tests/fixtures/gemini-v2-36-small-watermark.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        getAlphaMap: (size) => size === '36-v2'
+            ? alpha36V2
+            : (size === 48 ? alpha48 : (size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)))
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, {
+        logoSize: 36,
+        marginRight: 71,
+        marginBottom: 71,
+        alphaVariant: 'v2'
+    });
+    assert.ok(
+        result.meta.source.includes('v2-small-edge-cleanup'),
+        `expected v2 cleanup source, got ${result.meta.source}`
+    );
+    assert.ok(
+        Math.abs(result.meta.detection.processedSpatialScore) <= 0.08,
+        `expected v2 cleanup to preserve low spatial residual, got ${result.meta.detection.processedSpatialScore}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore < 0.08,
+        `expected v2 cleanup to reduce gradient residual, got ${result.meta.detection.processedGradientScore}`
+    );
+    assert.equal(result.meta.detection.residualVisibility?.visiblePositiveHalo, true);
+    assert.ok(
+        result.meta.detection.residualVisibility.positiveHaloLum > 6,
+        `expected final meta to report visible v2 positive halo, got ${JSON.stringify(result.meta.detection.residualVisibility)}`
+    );
 });
 
 test('processWatermarkImageData should allow weak alpha gain to compete as a first-pass candidate', async () => {
@@ -736,6 +808,92 @@ test('processWatermarkImageData should conservatively remove low-contrast 48px l
     }
 });
 
+test('processWatermarkImageData should cleanup residual edges on known 48px large-margin anchors', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const samples = [
+        '4-3.png',
+        '9-16.png'
+    ];
+
+    for (const fileName of samples) {
+        const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples', fileName));
+        const result = processWatermarkImageData(imageData, {
+            alpha48,
+            alpha96,
+            adaptiveMode: 'never',
+            getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+        });
+
+        assert.equal(result.meta.applied, true, `${fileName} skipReason=${result.meta.skipReason}`);
+        assert.deepEqual(result.meta.config, { logoSize: 48, marginRight: 96, marginBottom: 96 });
+        assert.ok(
+            String(result.meta.source).includes('+edge-cleanup'),
+            `${fileName} expected known 48px residual edge cleanup, source=${result.meta.source}`
+        );
+        assert.ok(
+            Math.abs(result.meta.detection.processedSpatialScore) <= 0.12,
+            `${fileName} spatial residual=${result.meta.detection.processedSpatialScore}`
+        );
+        assert.ok(
+            result.meta.detection.processedGradientScore <= 0.2,
+            `${fileName} gradient residual=${result.meta.detection.processedGradientScore}`
+        );
+    }
+});
+
+test('processWatermarkImageData should flat-fill residual edges only on smooth known 48px backgrounds', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const width = 720;
+    const height = 1456;
+    const data = new Uint8ClampedArray(width * height * 4);
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const offset = (y * width + x) * 4;
+            data[offset] = 76;
+            data[offset + 1] = Math.round(142 + y * 0.004);
+            data[offset + 2] = 148;
+            data[offset + 3] = 255;
+        }
+    }
+
+    const imageData = { width, height, data };
+    const position = { x: width - 96 - 48, y: height - 96 - 48, width: 48, height: 48 };
+    applySyntheticWatermark(imageData, alpha48, position, 0.85);
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const alpha = alpha48[row * position.width + col];
+            if (alpha < 0.02 || alpha > 0.55) continue;
+            const offset = ((position.y + row) * width + position.x + col) * 4;
+            data[offset] = Math.max(0, data[offset] - 34);
+            data[offset + 1] = Math.max(0, data[offset + 1] - 34);
+            data[offset + 2] = Math.max(0, data[offset + 2] - 34);
+        }
+    }
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.ok(
+        String(result.meta.source).includes('+flat-fill'),
+        `expected smooth residual to use flat-fill, source=${result.meta.source}`
+    );
+    const flatFillStage = result.meta.alphaAdjustmentStages?.find((stage) => stage.stage === 'known-48-flat-background-fill');
+    assert.ok(flatFillStage, `expected flat-fill stage, stages=${JSON.stringify(result.meta.alphaAdjustmentStages)}`);
+    assert.ok(
+        flatFillStage.afterGradientScore <= flatFillStage.beforeGradientScore - 0.045,
+        `expected flat-fill to suppress residual gradient, stage=${JSON.stringify(flatFillStage)}`
+    );
+});
+
 test('processWatermarkImageData should allow strong fixed-core standard evidence on dark textured backgrounds', async () => {
     const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
     const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
@@ -789,6 +947,224 @@ test('processWatermarkImageData should remove the 2816x1536 issue #68 watermark 
     assert.ok(
         result.meta.detection.processedGradientScore < 0.05,
         `expected residual gradient < 0.05, got ${result.meta.detection.processedGradientScore}, source=${result.meta.source}`
+    );
+});
+
+test('processWatermarkImageData should allow strong 2752x1536 new-margin alpha evidence through flat-background hard reject', async (t) => {
+    const samplePath = path.resolve('D:/Project/sample-files/gemini-watermark/2026-06-09/2064208514779189248-source.png');
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external 2752x1536 Gemini sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const alpha96NewMargin = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96_20260520.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        alpha96Variants: {
+            '20260520': alpha96NewMargin
+        },
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(
+        result.meta.position,
+        { x: 2464, y: 1248, width: 96, height: 96 }
+    );
+    assert.equal(result.meta.alphaGain, 1);
+    assert.ok(
+        String(result.meta.source).includes('+flat-fill'),
+        `expected smooth new-margin residual to use flat-fill, source=${result.meta.source}`
+    );
+    assert.ok(
+        result.meta.alphaAdjustmentStages?.some((stage) => stage.stage === 'new-margin-96-flat-background-fill'),
+        `expected new-margin flat-fill stage, stages=${JSON.stringify(result.meta.alphaAdjustmentStages)}`
+    );
+    assert.ok(
+        Math.abs(result.meta.detection.processedSpatialScore) <= 0.03,
+        `expected low residual spatial, got ${result.meta.detection.processedSpatialScore}, source=${result.meta.source}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.11,
+        `expected low residual gradient, got ${result.meta.detection.processedGradientScore}, source=${result.meta.source}`
+    );
+});
+
+test('processWatermarkImageData should allow strong 96px fixed-core evidence with slight negative overshoot', async (t) => {
+    const samplePath = path.resolve('D:/Project/sample-files/gemini-watermark/2026-06-08/2064116984391405568-source.png');
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external 1792x2400 Gemini sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 96, marginRight: 64, marginBottom: 64 });
+    assert.deepEqual(result.meta.position, { x: 1632, y: 2240, width: 96, height: 96 });
+    assert.equal(result.meta.alphaGain, 1);
+    assert.ok(
+        result.meta.detection.originalSpatialScore >= 0.95 &&
+            result.meta.detection.originalGradientScore >= 0.9,
+        `expected strong original evidence, detection=${JSON.stringify(result.meta.detection)}`
+    );
+    assert.ok(
+        result.meta.detection.processedSpatialScore < 0 &&
+            Math.abs(result.meta.detection.processedSpatialScore) <= 0.52,
+        `expected bounded negative overshoot, got ${result.meta.detection.processedSpatialScore}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.16,
+        `expected low residual gradient, got ${result.meta.detection.processedGradientScore}`
+    );
+    assert.equal(result.meta.selectionDebug?.hardReject, false);
+});
+
+test('processWatermarkImageData should keep 1696x2518 portrait sample on the full 96px anchor', async (t) => {
+    const samplePath = path.resolve('D:/Project/sample-files/gemini-watermark/2026-06-09/2064204960823775232-source.png');
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external 1696x2518 Gemini sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 96, marginRight: 64, marginBottom: 64 });
+    assert.deepEqual(result.meta.position, { x: 1536, y: 2358, width: 96, height: 96 });
+    assert.equal(result.meta.source, 'standard');
+    assert.equal(result.meta.alphaGain, 1);
+    assert.equal(result.meta.selectionDebug?.usedCatalogVariant, false);
+    assert.ok(
+        result.meta.detection.originalSpatialScore >= 0.4 &&
+            result.meta.detection.originalGradientScore >= 0.2,
+        `expected strong original 96px evidence, detection=${JSON.stringify(result.meta.detection)}`
+    );
+    assert.ok(
+        Math.abs(result.meta.detection.processedSpatialScore) <= 0.04 &&
+            result.meta.detection.processedGradientScore <= 0.04,
+        `expected low residual on full 96px anchor, detection=${JSON.stringify(result.meta.detection)}`
+    );
+});
+
+test('processWatermarkImageData should prefer strong 96px evidence over a weak 48px large-margin crop', async (t) => {
+    const samplePath = path.resolve('D:/Project/sample-files/gemini-watermark/2026-06-09/2064229579895083008-source.png');
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external 1792x2390 Gemini sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 96, marginRight: 64, marginBottom: 64 });
+    assert.deepEqual(result.meta.position, { x: 1632, y: 2230, width: 96, height: 96 });
+    assert.equal(result.meta.source, 'standard+gain');
+    assert.equal(result.meta.alphaGain, 0.85);
+    assert.equal(result.meta.selectionDebug?.usedCatalogVariant, false);
+    assert.ok(
+        result.meta.detection.originalSpatialScore >= 0.55 &&
+            result.meta.detection.originalGradientScore >= 0.5,
+        `expected strong original 96px evidence, detection=${JSON.stringify(result.meta.detection)}`
+    );
+    assert.ok(
+        Math.abs(result.meta.detection.processedSpatialScore) <= 0.08 &&
+            result.meta.detection.processedGradientScore <= 0.24,
+        `expected bounded residual on full 96px anchor, detection=${JSON.stringify(result.meta.detection)}`
+    );
+    assert.equal(result.meta.detection.residualVisibility?.visible, false);
+});
+
+test('processWatermarkImageData should keep a 1024x1024 dark sample on the 48px large-margin anchor', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('tests/fixtures/gemini-1024-large-margin.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 48, marginRight: 96, marginBottom: 96 });
+    assert.deepEqual(result.meta.position, { x: 880, y: 880, width: 48, height: 48 });
+    assert.ok(
+        result.meta.detection.originalSpatialScore >= 0.99 &&
+            result.meta.detection.originalGradientScore >= 0.99,
+        `expected strong original evidence, detection=${JSON.stringify(result.meta.detection)}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.02,
+        `expected low residual gradient, got ${result.meta.detection.processedGradientScore}, source=${result.meta.source}`
+    );
+});
+
+test('processWatermarkImageData should remove a near-official 895x1200 large-margin sample', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('tests/fixtures/gemini-near-official-895x1200-large-margin.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 48, marginRight: 96, marginBottom: 96 });
+    assert.deepEqual(result.meta.position, { x: 751, y: 1056, width: 48, height: 48 });
+    assert.ok(
+        result.meta.detection.originalSpatialScore >= 0.99 &&
+            result.meta.detection.originalGradientScore >= 0.99,
+        `expected strong original evidence, detection=${JSON.stringify(result.meta.detection)}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.1,
+        `expected low residual gradient, got ${result.meta.detection.processedGradientScore}, source=${result.meta.source}`
     );
 });
 

@@ -5,6 +5,7 @@ import {
     assessRemovalDiffArtifacts,
     assessReferenceTextureAlignment,
     assessReferenceTextureAlignmentFromStats,
+    assessWatermarkResidualVisibility,
     calculateNearBlackRatio,
     cloneImageData
 } from '../../src/core/restorationMetrics.js';
@@ -172,4 +173,49 @@ test('assessRemovalDiffArtifacts should identify ideal inverse-alpha removal sha
         `diffTemplateCorrelation=${artifacts.diffTemplateCorrelation}`
     );
     assert.equal(artifacts.negativeDiffRatio, 0);
+});
+
+test('assessWatermarkResidualVisibility should flag bright alpha-band halos even when gradient is low', () => {
+    const width = 12;
+    const height = 12;
+    const position = { x: 4, y: 4, width: 4, height: 4 };
+    const alphaMap = new Float32Array([
+        0, 0.2, 0.2, 0,
+        0.2, 0.3, 0.3, 0.2,
+        0.2, 0.3, 0.3, 0.2,
+        0, 0.2, 0.2, 0
+    ]);
+    const imageData = {
+        width,
+        height,
+        data: new Uint8ClampedArray(width * height * 4)
+    };
+
+    for (let index = 0; index < imageData.data.length; index += 4) {
+        imageData.data[index] = 80;
+        imageData.data[index + 1] = 80;
+        imageData.data[index + 2] = 80;
+        imageData.data[index + 3] = 255;
+    }
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const alpha = alphaMap[row * position.width + col];
+            if (alpha < 0.18) continue;
+            const pixelIndex = ((position.y + row) * width + position.x + col) * 4;
+            imageData.data[pixelIndex] = 92;
+            imageData.data[pixelIndex + 1] = 92;
+            imageData.data[pixelIndex + 2] = 92;
+        }
+    }
+
+    const visibility = assessWatermarkResidualVisibility({
+        imageData,
+        position,
+        alphaMap
+    });
+
+    assert.equal(visibility.visible, true);
+    assert.equal(visibility.visiblePositiveHalo, true);
+    assert.ok(visibility.positiveHaloLum >= 6, `positiveHaloLum=${visibility.positiveHaloLum}`);
 });

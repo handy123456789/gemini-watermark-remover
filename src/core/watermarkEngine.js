@@ -57,7 +57,7 @@ export class WatermarkEngine {
      * @returns {Promise<Float32Array>} Alpha map
      */
     async getAlphaMap(size) {
-        if (size === '96-20260520') {
+        if (size === '96-20260520' || size === '36-v2') {
             if (this.alphaMaps[size]) return this.alphaMaps[size];
             const alphaMap = getEmbeddedAlphaMap(size);
             if (!alphaMap) {
@@ -115,6 +115,7 @@ export class WatermarkEngine {
         const alpha48 = await this.getAlphaMap(48);
         const alpha96 = await this.getAlphaMap(96);
         const alpha96NewMargin = await this.getAlphaMap('96-20260520');
+        await this.getAlphaMap('36-v2');
         const processingStartedAt = now();
         const result = processWatermarkImageData(originalImageData, {
             alpha48,

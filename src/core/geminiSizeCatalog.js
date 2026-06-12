@@ -25,6 +25,12 @@ const GEMINI_3X_CURRENT_1K_LARGE_MARGIN_WATERMARK_CONFIG = Object.freeze({
     marginRight: 96,
     marginBottom: 96
 });
+const GEMINI_3X_V2_SMALL_WATERMARK_CONFIG = Object.freeze({
+    logoSize: 36,
+    marginRight: 96,
+    marginBottom: 96,
+    alphaVariant: 'v2'
+});
 const KNOWN_FIXED_GEMINI_WATERMARK_CONFIGS_BY_SIZE = Object.freeze({
     '1408x768': Object.freeze([
         Object.freeze({ logoSize: 46, marginRight: 32, marginBottom: 32, fixedVariant: true })
@@ -212,6 +218,28 @@ function createCurrentLargeMarginVariantConfig(baseConfig, width, height, { allo
     return x >= 0 && y >= 0 ? config : null;
 }
 
+function createV2SmallVariantConfig(width, height) {
+    const normalizedWidth = normalizeDimension(width);
+    const normalizedHeight = normalizeDimension(height);
+    if (!normalizedWidth || !normalizedHeight) return null;
+    if (Math.max(normalizedWidth, normalizedHeight) > 2048) return null;
+
+    const longSide = Math.max(normalizedWidth, normalizedHeight);
+    const shortSide = Math.min(normalizedWidth, normalizedHeight);
+    const sourceLongDim = shortSide >= 566
+        ? 2752
+        : (shortSide >= 550 ? 2816 : 2848);
+    const margin = Math.round(192 * (longSide / sourceLongDim));
+    const config = {
+        ...GEMINI_3X_V2_SMALL_WATERMARK_CONFIG,
+        marginRight: margin,
+        marginBottom: margin
+    };
+    const x = normalizedWidth - config.marginRight - config.logoSize;
+    const y = normalizedHeight - config.marginBottom - config.logoSize;
+    return x >= 0 && y >= 0 ? config : null;
+}
+
 export function matchOfficialGeminiImageSize(width, height) {
     const normalizedWidth = normalizeDimension(width);
     const normalizedHeight = normalizeDimension(height);
@@ -307,11 +335,26 @@ export function resolveOfficialGeminiSearchConfigEntries(
                     source: '202606-large-margin'
                 }));
             }
+            const v2SmallVariant = createV2SmallVariantConfig(
+                normalizedWidth,
+                normalizedHeight
+            );
+            if (v2SmallVariant) {
+                entries.push(createCatalogEntry(v2SmallVariant, {
+                    family: 'gemini-v2-small',
+                    sourcePriority: 2,
+                    evidenceGate: 'medium',
+                    modelFamily: match.modelFamily,
+                    resolutionTier: match.resolutionTier,
+                    aspectRatio: match.aspectRatio,
+                    source: 'allenk-v2-small'
+                }));
+            }
         }
         for (const legacyConfig of getEntryLegacyConfigs(match)) {
             entries.push(createCatalogEntry({ ...legacyConfig }, {
                 family: 'exact-official-legacy',
-                sourcePriority: 2,
+                sourcePriority: 3,
                 evidenceGate: 'required',
                 modelFamily: match?.modelFamily ?? null,
                 resolutionTier: match?.resolutionTier ?? null,

@@ -5,6 +5,7 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import sharp from 'sharp';
 
 import { calculateAlphaMap } from '../src/core/alphaMap.js';
+import { getEmbeddedAlphaMap } from '../src/core/embeddedAlphaMaps.js';
 import { interpolateAlphaMap } from '../src/core/adaptiveDetector.js';
 import { processWatermarkImageData } from '../src/core/watermarkProcessor.js';
 
@@ -112,6 +113,7 @@ export async function exportFixedSamples(inputDir, { overwrite = true } = {}) {
     const alpha96 = calculateAlphaMap(await decodeImageDataInNode(bg96Path));
     const alpha96Legacy = calculateAlphaMap(await decodeImageDataInNode(bg96LegacyPath));
     const alphaResolver = (size) => {
+        if (size === '36-v2') return getEmbeddedAlphaMap('36-v2');
         if (size === 48) return alpha48;
         if (size === 96) return alpha96;
         return interpolateAlphaMap(alpha96, 96, size);
