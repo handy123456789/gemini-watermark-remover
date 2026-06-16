@@ -222,6 +222,38 @@ function setProgress(progress, label) {
     els.progressText.textContent = label || `${pct}%`;
 }
 
+function yieldToBrowserFrame() {
+    return new Promise((resolve) => {
+        const finish = () => setTimeout(resolve, 0);
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(finish);
+        } else {
+            finish();
+        }
+    });
+}
+
+function createDetectionProgressHandler(jobId, { start = 0, span = 1 } = {}) {
+    return ({ progress = 0, step = 'detect', sampledFrames = 0, sampleCount = 0 } = {}) => {
+        if (jobId !== state.jobId) return;
+        const safeProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+        const labelByStep = {
+            metadata: '读取视频',
+            sample: sampleCount > 0 ? `抽帧 ${sampledFrames}/${sampleCount}` : '抽帧',
+            score: '匹配水印',
+            done: '检测完成'
+        };
+        setProgress(start + safeProgress * span, labelByStep[step] || '检测中');
+        if (step === 'sample') {
+            setStatus(sampleCount > 0
+                ? `正在抽帧检测水印：${sampledFrames}/${sampleCount}`
+                : '正在抽帧检测水印...');
+        } else if (step === 'score') {
+            setStatus('正在匹配水印候选，页面会保持响应...');
+        }
+    };
+}
+
 function formatSeconds(value) {
     if (!Number.isFinite(value)) return '未知';
     return `${value.toFixed(2)}s`;
@@ -498,9 +530,12 @@ async function runDetection() {
     setStatus('正在抽帧检测右下角水印...');
 
     try {
+        await yieldToBrowserFrame();
         const result = await detectGeminiVideoWatermark(state.file, {
             ...getDebugAlphaOptions(),
-            sampleCount: Number(els.sampleCount.value) || DEFAULT_SAMPLE_COUNT
+            sampleCount: Number(els.sampleCount.value) || DEFAULT_SAMPLE_COUNT,
+            onProgress: createDetectionProgressHandler(jobId, { start: 0.05, span: 0.9 }),
+            yieldToMainThread: yieldToBrowserFrame
         });
         if (jobId !== state.jobId) return;
         state.metadata = result.metadata;
@@ -537,9 +572,12 @@ async function runExport() {
         if (!detectionPayload) {
             setProgress(0.04, '检测中');
             setStatus('正在检测水印候选...');
+            await yieldToBrowserFrame();
             const detected = await detectGeminiVideoWatermark(state.file, {
                 ...getDebugAlphaOptions(),
-                sampleCount: Number(els.sampleCount.value) || DEFAULT_SAMPLE_COUNT
+                sampleCount: Number(els.sampleCount.value) || DEFAULT_SAMPLE_COUNT,
+                onProgress: createDetectionProgressHandler(jobId, { start: 0.04, span: 0.08 }),
+                yieldToMainThread: yieldToBrowserFrame
             });
             if (jobId !== state.jobId) return;
             state.metadata = detected.metadata;
@@ -582,6 +620,7 @@ async function runExport() {
             allenkFdncnnSigma,
             allenkFdncnnPadding,
             allenkFdncnnTemporalReuse,
+            yieldToMainThread: yieldToBrowserFrame,
             onProgress: ({ phase, progress, processedFrames, metadata, detection, aiDenoiseFrames, aiReuseFrames }) => {
                 if (jobId !== state.jobId) return;
                 if (metadata) {

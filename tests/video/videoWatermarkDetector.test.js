@@ -6,6 +6,7 @@ import {
     classifyVideoWatermarkEvidenceSummary,
     classifyVideoWatermarkFramePolarity,
     computeVideoBackgroundNormalizedAlphaContrast,
+    detectVideoWatermarkFromFramesAsync,
     detectVideoWatermarkFromFrames,
     getVideoAlphaMap,
     resolveVideoAlphaEdgeBoost,
@@ -160,6 +161,44 @@ test('detectVideoWatermarkFromFrames should vote for the candidate present acros
         minConfidence: 0.02
     });
 
+    assert.equal(result.candidate.id, target.id);
+    assert.equal(result.position.x, target.x);
+    assert.equal(result.position.y, target.y);
+    assert.equal(result.isConfident, true);
+});
+
+test('detectVideoWatermarkFromFramesAsync yields while preserving selected detection', async () => {
+    const width = 480;
+    const height = 270;
+    const candidates = resolveVideoWatermarkCandidates(width, height);
+    const target = candidates[1];
+    const alphaMap = getVideoAlphaMap(target.size, { candidate: target });
+    const frames = [];
+
+    for (let i = 0; i < 4; i++) {
+        const imageData = createPatternImageData(width, height);
+        applyWhiteWatermark(imageData, alphaMap, {
+            x: target.x,
+            y: target.y,
+            width: target.size,
+            height: target.size
+        });
+        frames.push({ timestamp: i / 24, imageData });
+    }
+    let yieldCount = 0;
+
+    const result = await detectVideoWatermarkFromFramesAsync({
+        frames,
+        width,
+        height,
+        candidates,
+        minConfidence: 0.02,
+        yieldToMainThread: async () => {
+            yieldCount++;
+        }
+    });
+
+    assert.ok(yieldCount > 0);
     assert.equal(result.candidate.id, target.id);
     assert.equal(result.position.x, target.x);
     assert.equal(result.position.y, target.y);

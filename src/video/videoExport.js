@@ -14,7 +14,7 @@ import {
 } from 'mediabunny';
 import { removeWatermark } from '../core/blendModes.js';
 import {
-    detectVideoWatermarkFromFrames,
+    detectVideoWatermarkFromFramesAsync,
     scoreVideoWatermarkFrame
 } from './videoWatermarkDetector.js';
 import { resolveVideoWatermarkCandidates } from './videoWatermarkCatalog.js';
@@ -246,9 +246,20 @@ export async function inspectGeminiVideoFile(file) {
 }
 
 export async function detectGeminiVideoWatermark(file, options = {}) {
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+    const yieldToMainThread = typeof options.yieldToMainThread === 'function'
+        ? options.yieldToMainThread
+        : async () => {};
     const { input, videoTrack } = await getVideoContext(file);
     try {
         const metadata = await resolveVideoMetadata(input, videoTrack);
+        onProgress({
+            phase: 'detect',
+            step: 'metadata',
+            progress: 0.04,
+            metadata
+        });
+        await yieldToMainThread();
         const canvas = createRuntimeCanvas(metadata.width, metadata.height);
         const ctx = get2dContext(canvas);
         const sink = new VideoSampleSink(videoTrack);
@@ -271,6 +282,15 @@ export async function detectGeminiVideoWatermark(file, options = {}) {
                     imageData: ctx.getImageData(0, 0, metadata.width, metadata.height)
                 });
                 targetIndex++;
+                onProgress({
+                    phase: 'detect',
+                    step: 'sample',
+                    progress: 0.06 + 0.54 * Math.min(1, frames.length / targets.length),
+                    metadata,
+                    sampledFrames: frames.length,
+                    sampleCount: targets.length
+                });
+                await yieldToMainThread();
             } finally {
                 sample.close();
             }
@@ -280,7 +300,17 @@ export async function detectGeminiVideoWatermark(file, options = {}) {
             throw new Error('无法从视频中抽取检测帧');
         }
 
-        const detection = detectVideoWatermarkFromFrames({
+        onProgress({
+            phase: 'detect',
+            step: 'score',
+            progress: 0.65,
+            metadata,
+            sampledFrames: frames.length,
+            sampleCount: targets.length
+        });
+        await yieldToMainThread();
+
+        const detection = await detectVideoWatermarkFromFramesAsync({
             frames,
             width: metadata.width,
             height: metadata.height,
@@ -294,7 +324,15 @@ export async function detectGeminiVideoWatermark(file, options = {}) {
                 localRegion: options.alphaLocalRegion,
                 localLowAlphaScale: options.alphaLocalLowScale,
                 localBodyAlphaScale: options.alphaLocalBodyScale
-            }
+            },
+            yieldToMainThread
+        });
+        onProgress({
+            phase: 'detect',
+            step: 'done',
+            progress: 1,
+            metadata,
+            detection
         });
 
         return {
@@ -832,7 +870,9 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
         alphaEdgeBoost: options.alphaEdgeBoost,
         alphaLocalRegion: options.alphaLocalRegion,
         alphaLocalLowScale: options.alphaLocalLowScale,
-        alphaLocalBodyScale: options.alphaLocalBodyScale
+        alphaLocalBodyScale: options.alphaLocalBodyScale,
+        onProgress,
+        yieldToMainThread: options.yieldToMainThread
     });
     const { metadata, detection } = detected;
     const allenkFdncnnPadding = resolveExportAllenkFdncnnPadding(cleanupOptions, detection);

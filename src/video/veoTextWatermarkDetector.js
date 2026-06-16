@@ -3,6 +3,8 @@ import { getVeoTextWatermarkTemplates } from './veoTextWatermarkTemplates.js';
 const DEFAULT_MIN_NCC = 0.62;
 const DEFAULT_VOTE_RATIO = 0.6;
 const DEFAULT_ACTIVE_THRESHOLD = 0.02;
+const DEFAULT_MARGIN_RADIUS_MIN = 4;
+const DEFAULT_MARGIN_RADIUS_SCALE = 0.35;
 
 function clampInteger(value, min, max) {
     return Math.max(min, Math.min(max, Math.round(value)));
@@ -115,10 +117,10 @@ export function resolveVeoTextSearchCandidates({
         if (!template || template.width > width || template.height > height) continue;
         const radiusX = Number.isFinite(marginRadiusX)
             ? marginRadiusX
-            : Math.max(12, Math.round(template.width * 1.6));
+            : Math.max(DEFAULT_MARGIN_RADIUS_MIN, Math.round(Math.min(template.width, template.height) * DEFAULT_MARGIN_RADIUS_SCALE));
         const radiusY = Number.isFinite(marginRadiusY)
             ? marginRadiusY
-            : Math.max(10, Math.round(template.height * 1.6));
+            : Math.max(DEFAULT_MARGIN_RADIUS_MIN, Math.round(Math.min(template.width, template.height) * DEFAULT_MARGIN_RADIUS_SCALE));
         const centerRight = template.marginRight;
         const centerBottom = template.marginBottom;
         const rightMargins = buildIntegerRange(centerRight, radiusX, 0, width - template.width);
@@ -211,75 +213,29 @@ function selectVeoTextCandidateSummaries(summaries, limit = 20) {
     return [...selected.values()].map(formatVeoTextCandidateSummary);
 }
 
-export function detectVeoTextWatermarkFromFrames({
+function createEmptyVeoTextDetection({ frameCount = 0, minNcc, candidates = [], frameWinners = [] }) {
+    return {
+        watermarkKind: 'veo-text',
+        isConfident: false,
+        position: null,
+        alphaMap: null,
+        template: null,
+        summary: {
+            frameCount,
+            minNcc,
+            candidates,
+            frameWinners
+        }
+    };
+}
+
+function buildVeoTextDetectionResult({
     frames,
-    width,
-    height,
-    templates = getVeoTextWatermarkTemplates(),
-    minNcc = DEFAULT_MIN_NCC,
-    minVoteRatio = DEFAULT_VOTE_RATIO,
-    marginRadiusX = null,
-    marginRadiusY = null
-} = {}) {
-    if (!Array.isArray(frames) || frames.length === 0) {
-        return {
-            watermarkKind: 'veo-text',
-            isConfident: false,
-            position: null,
-            alphaMap: null,
-            template: null,
-            summary: {
-                frameCount: 0,
-                minNcc,
-                candidates: [],
-                frameWinners: []
-            }
-        };
-    }
-
-    const candidates = resolveVeoTextSearchCandidates({
-        width,
-        height,
-        templates,
-        marginRadiusX,
-        marginRadiusY
-    });
-    const perCandidate = new Map(candidates.map((candidate) => [candidate.id, {
-        candidate,
-        scores: [],
-        votes: 0
-    }]));
-    const frameWinners = [];
-
-    for (const frame of frames) {
-        let winner = null;
-        for (const candidate of candidates) {
-            const score = scoreVeoTextTemplateAt(frame.imageData, candidate.template, candidate.x, candidate.y);
-            const scored = {
-                timestamp: frame.timestamp,
-                ncc: score.ncc,
-                confidence: score.confidence
-            };
-            perCandidate.get(candidate.id).scores.push(scored);
-            if (!winner || score.confidence > winner.confidence) {
-                winner = {
-                    candidateId: candidate.id,
-                    templateId: candidate.template.id,
-                    timestamp: frame.timestamp,
-                    x: candidate.x,
-                    y: candidate.y,
-                    ncc: score.ncc,
-                    confidence: score.confidence
-                };
-            }
-        }
-        if (winner) {
-            frameWinners.push(winner);
-            const entry = perCandidate.get(winner.candidateId);
-            if (entry) entry.votes++;
-        }
-    }
-
+    perCandidate,
+    frameWinners,
+    minNcc,
+    minVoteRatio
+}) {
     const summaries = [...perCandidate.values()]
         .map((entry) => ({
             candidate: entry.candidate,
@@ -294,19 +250,12 @@ export function detectVeoTextWatermarkFromFrames({
 
     const best = summaries[0] || null;
     if (!best) {
-        return {
-            watermarkKind: 'veo-text',
-            isConfident: false,
-            position: null,
-            alphaMap: null,
-            template: null,
-            summary: {
-                frameCount: frames.length,
-                minNcc,
-                candidates: [],
-                frameWinners
-            }
-        };
+        return createEmptyVeoTextDetection({
+            frameCount: frames.length,
+            minNcc,
+            candidates: [],
+            frameWinners
+        });
     }
 
     const effectiveMinNcc = Number.isFinite(best.candidate.template.minNcc)
@@ -370,6 +319,155 @@ export function detectVeoTextWatermarkFromFrames({
             frameWinners
         }
     };
+}
+
+async function maybeYieldToMainThread(yieldToMainThread) {
+    if (typeof yieldToMainThread === 'function') {
+        await yieldToMainThread();
+    }
+}
+
+export function detectVeoTextWatermarkFromFrames({
+    frames,
+    width,
+    height,
+    templates = getVeoTextWatermarkTemplates(),
+    minNcc = DEFAULT_MIN_NCC,
+    minVoteRatio = DEFAULT_VOTE_RATIO,
+    marginRadiusX = null,
+    marginRadiusY = null
+} = {}) {
+    if (!Array.isArray(frames) || frames.length === 0) {
+        return createEmptyVeoTextDetection({ minNcc });
+    }
+
+    const candidates = resolveVeoTextSearchCandidates({
+        width,
+        height,
+        templates,
+        marginRadiusX,
+        marginRadiusY
+    });
+    const perCandidate = new Map(candidates.map((candidate) => [candidate.id, {
+        candidate,
+        scores: [],
+        votes: 0
+    }]));
+    const frameWinners = [];
+
+    for (const frame of frames) {
+        let winner = null;
+        for (const candidate of candidates) {
+            const score = scoreVeoTextTemplateAt(frame.imageData, candidate.template, candidate.x, candidate.y);
+            const scored = {
+                timestamp: frame.timestamp,
+                ncc: score.ncc,
+                confidence: score.confidence
+            };
+            perCandidate.get(candidate.id).scores.push(scored);
+            if (!winner || score.confidence > winner.confidence) {
+                winner = {
+                    candidateId: candidate.id,
+                    templateId: candidate.template.id,
+                    timestamp: frame.timestamp,
+                    x: candidate.x,
+                    y: candidate.y,
+                    ncc: score.ncc,
+                    confidence: score.confidence
+                };
+            }
+        }
+        if (winner) {
+            frameWinners.push(winner);
+            const entry = perCandidate.get(winner.candidateId);
+            if (entry) entry.votes++;
+        }
+    }
+
+    return buildVeoTextDetectionResult({
+        frames,
+        perCandidate,
+        frameWinners,
+        minNcc,
+        minVoteRatio
+    });
+}
+
+export async function detectVeoTextWatermarkFromFramesAsync({
+    frames,
+    width,
+    height,
+    templates = getVeoTextWatermarkTemplates(),
+    minNcc = DEFAULT_MIN_NCC,
+    minVoteRatio = DEFAULT_VOTE_RATIO,
+    marginRadiusX = null,
+    marginRadiusY = null,
+    yieldEveryCandidates = 96,
+    yieldToMainThread = null
+} = {}) {
+    if (!Array.isArray(frames) || frames.length === 0) {
+        await maybeYieldToMainThread(yieldToMainThread);
+        return createEmptyVeoTextDetection({ minNcc });
+    }
+
+    const candidates = resolveVeoTextSearchCandidates({
+        width,
+        height,
+        templates,
+        marginRadiusX,
+        marginRadiusY
+    });
+    const perCandidate = new Map(candidates.map((candidate) => [candidate.id, {
+        candidate,
+        scores: [],
+        votes: 0
+    }]));
+    const frameWinners = [];
+    const safeYieldEveryCandidates = Math.max(1, Math.round(yieldEveryCandidates || 96));
+    let scoredCandidateCount = 0;
+
+    for (const frame of frames) {
+        let winner = null;
+        for (const candidate of candidates) {
+            const score = scoreVeoTextTemplateAt(frame.imageData, candidate.template, candidate.x, candidate.y);
+            const scored = {
+                timestamp: frame.timestamp,
+                ncc: score.ncc,
+                confidence: score.confidence
+            };
+            perCandidate.get(candidate.id).scores.push(scored);
+            if (!winner || score.confidence > winner.confidence) {
+                winner = {
+                    candidateId: candidate.id,
+                    templateId: candidate.template.id,
+                    timestamp: frame.timestamp,
+                    x: candidate.x,
+                    y: candidate.y,
+                    ncc: score.ncc,
+                    confidence: score.confidence
+                };
+            }
+
+            scoredCandidateCount++;
+            if (scoredCandidateCount % safeYieldEveryCandidates === 0) {
+                await maybeYieldToMainThread(yieldToMainThread);
+            }
+        }
+        if (winner) {
+            frameWinners.push(winner);
+            const entry = perCandidate.get(winner.candidateId);
+            if (entry) entry.votes++;
+        }
+        await maybeYieldToMainThread(yieldToMainThread);
+    }
+
+    return buildVeoTextDetectionResult({
+        frames,
+        perCandidate,
+        frameWinners,
+        minNcc,
+        minVoteRatio
+    });
 }
 
 export function createSyntheticVeoTextWatermarkImageData({

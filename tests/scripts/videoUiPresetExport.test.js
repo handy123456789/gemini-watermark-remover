@@ -44,3 +44,22 @@ test('export-video-ui-preset source clicks the relocated review preset button', 
   assert.match(source, /document\.querySelector\(selector\)\?\.click\(\)/);
   assert.match(source, /locator\('#processBtn'\)\.click\(\)/);
 });
+
+test('video preview comparison panes should show the full frame without cropping', () => {
+  const html = readFileSync(new URL('../../public/video-preview.html', import.meta.url), 'utf8');
+  const videoRule = html.match(/\.compare-pane video\s*\{[^}]+\}/)?.[0] ?? '';
+
+  assert.match(videoRule, /width:\s*100%;/);
+  assert.match(videoRule, /height:\s*100%;/);
+  assert.match(videoRule, /object-fit:\s*contain;/);
+  assert.doesNotMatch(videoRule, /object-fit:\s*cover;/);
+});
+
+test('video preview detection should yield to the browser while reporting progress', () => {
+  const source = readFileSync(new URL('../../src/video-app.js', import.meta.url), 'utf8');
+
+  assert.match(source, /function yieldToBrowserFrame\(\)/);
+  assert.match(source, /function createDetectionProgressHandler/);
+  assert.match(source, /yieldToMainThread:\s*yieldToBrowserFrame/);
+  assert.match(source, /onProgress:\s*createDetectionProgressHandler/);
+});

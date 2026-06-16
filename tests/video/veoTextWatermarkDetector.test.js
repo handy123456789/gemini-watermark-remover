@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
     createSyntheticVeoTextWatermarkImageData,
+    detectVeoTextWatermarkFromFramesAsync,
     detectVeoTextWatermarkFromFrames,
     resolveVeoTextSearchCandidates,
     scoreVeoTextTemplateAt
@@ -64,6 +65,41 @@ test('detectVeoTextWatermarkFromFrames selects the 23x10 Veo text template on 72
     assert.equal(result.summary.best.votes, frames.length);
 });
 
+test('detectVeoTextWatermarkFromFramesAsync yields while preserving Veo text detection result', async () => {
+    const template = getVeoTextWatermarkTemplate('veo-text-23x10', { alphaGain: 0.3 });
+    const position = { x: 682, y: 1254, width: 23, height: 10 };
+    const frames = [0, 1, 2].map((timestamp) => ({
+        timestamp,
+        imageData: createSyntheticVeoTextWatermarkImageData({
+            width: 720,
+            height: 1280,
+            template,
+            position,
+            backgroundValue: 40 + timestamp
+        })
+    }));
+    let yieldCount = 0;
+
+    const result = await detectVeoTextWatermarkFromFramesAsync({
+        frames,
+        width: 720,
+        height: 1280,
+        templates: [template],
+        minNcc: 0.8,
+        yieldEveryCandidates: 10,
+        yieldToMainThread: async () => {
+            yieldCount++;
+        }
+    });
+
+    assert.ok(yieldCount > 0);
+    assert.equal(result.watermarkKind, 'veo-text');
+    assert.equal(result.isConfident, true);
+    assert.equal(result.template.id, 'veo-text-23x10');
+    assert.deepEqual(result.position, position);
+    assert.equal(result.summary.best.votes, frames.length);
+});
+
 test('detectVeoTextWatermarkFromFrames fails closed on blank frames', () => {
     const template = getVeoTextWatermarkTemplate('veo-text-23x10');
     const frames = [0, 1, 2, 3, 4].map((timestamp) => ({
@@ -99,6 +135,21 @@ test('detectVeoTextWatermarkFromFrames keeps default-margin candidates for resid
     assert.ok(
         result.summary.candidates.some((candidate) => candidate.candidateId === 'veo-text-23x10:682:1254'),
         result.summary.candidates.map((candidate) => candidate.candidateId)
+    );
+});
+
+test('resolveVeoTextSearchCandidates keeps the default search set bounded for UI detection', () => {
+    const template = getVeoTextWatermarkTemplate('veo-text-23x10');
+    const candidates = resolveVeoTextSearchCandidates({
+        width: 720,
+        height: 1280,
+        templates: [template]
+    });
+
+    assert.ok(candidates.length <= 100, candidates.length);
+    assert.ok(
+        candidates.some((candidate) => candidate.id === 'veo-text-23x10:682:1254'),
+        candidates.map((candidate) => candidate.id)
     );
 });
 

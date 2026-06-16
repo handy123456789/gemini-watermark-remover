@@ -6,6 +6,7 @@ import {
 import { resolveVideoWatermarkCandidates } from './videoWatermarkCatalog.js';
 import {
     computeRectangularSpatialCorrelation,
+    detectVeoTextWatermarkFromFramesAsync,
     detectVeoTextWatermarkFromFrames
 } from './veoTextWatermarkDetector.js';
 
@@ -878,6 +879,127 @@ export function detectDiamondVideoWatermarkFromFrames({
     };
 }
 
+async function maybeYieldToMainThread(yieldToMainThread) {
+    if (typeof yieldToMainThread === 'function') {
+        await yieldToMainThread();
+    }
+}
+
+export async function detectDiamondVideoWatermarkFromFramesAsync({
+    frames,
+    width,
+    height,
+    candidates = resolveVideoWatermarkCandidates(width, height),
+    minConfidence = DEFAULT_MIN_CONFIDENCE,
+    alphaMapOptions = {},
+    yieldToMainThread = null
+}) {
+    if (!Array.isArray(frames) || frames.length === 0) {
+        throw new Error('No video frames are available for detection');
+    }
+    if (!candidates.length) {
+        throw new Error('Unsupported video watermark candidates for ' + width + 'x' + height);
+    }
+
+    const perCandidate = new Map(candidates.map((candidate) => [candidate.id, {
+        candidate,
+        scores: []
+    }]));
+
+    const frameWinners = [];
+    for (const frame of frames) {
+        const scored = candidates
+            .map((candidate) => scoreCandidateOnFrame(frame.imageData, candidate, alphaMapOptions))
+            .sort((a, b) => b.confidence - a.confidence);
+
+        const winner = scored[0] || null;
+        if (winner) {
+            frameWinners.push({
+                timestamp: frame.timestamp,
+                candidateId: winner.candidate.id,
+                confidence: winner.confidence
+            });
+        }
+
+        for (const score of scored) {
+            perCandidate.get(score.candidate.id).scores.push(score);
+        }
+        await maybeYieldToMainThread(yieldToMainThread);
+    }
+
+    for (const winner of frameWinners) {
+        const entry = perCandidate.get(winner.candidateId);
+        if (entry) entry.votes = (entry.votes || 0) + 1;
+    }
+
+    const summaries = [...perCandidate.values()]
+        .map((entry) => ({
+            candidate: entry.candidate,
+            ...summarizeCandidate(entry.scores),
+            votes: entry.votes || 0
+        }))
+        .sort((a, b) => {
+            if (b.votes !== a.votes) return b.votes - a.votes;
+            return b.meanConfidence - a.meanConfidence;
+        });
+
+    const best = summaries[0];
+    const alphaMap = getVideoAlphaMap(best.candidate.size, { ...alphaMapOptions, candidate: best.candidate });
+    const voteRatio = frames.length > 0 ? best.votes / frames.length : 0;
+    const isConfident =
+        best.meanConfidence >= minConfidence &&
+        voteRatio >= 0.6;
+    const position = {
+        x: best.candidate.x,
+        y: best.candidate.y,
+        width: best.candidate.size,
+        height: best.candidate.size
+    };
+    const alphaSeed = estimateAlphaSeedFromFrames(
+        frames,
+        position,
+        alphaMap,
+        frameWinners,
+        best.candidate.id
+    );
+
+    return {
+        watermarkKind: 'diamond',
+        position,
+        alphaMap,
+        alphaSeed,
+        candidate: best.candidate,
+        isConfident,
+        summary: {
+            frameCount: frames.length,
+            minConfidence,
+            alphaSeed,
+            best: {
+                candidateId: best.candidate.id,
+                label: best.candidate.label,
+                meanSpatial: best.meanSpatial,
+                meanGradient: best.meanGradient,
+                meanConfidence: best.meanConfidence,
+                maxConfidence: best.maxConfidence,
+                votes: best.votes
+            },
+            candidates: summaries.map((summary) => ({
+                candidateId: summary.candidate.id,
+                label: summary.candidate.label,
+                x: summary.candidate.x,
+                y: summary.candidate.y,
+                size: summary.candidate.size,
+                meanSpatial: summary.meanSpatial,
+                meanGradient: summary.meanGradient,
+                meanConfidence: summary.meanConfidence,
+                maxConfidence: summary.maxConfidence,
+                votes: summary.votes
+            })),
+            frameWinners
+        }
+    };
+}
+
 export function selectVideoWatermarkDetection({
     diamondDetection = null,
     veoTextDetection = null,
@@ -951,9 +1073,55 @@ export function detectVideoWatermarkFromFrames({
 
     if (!selected) {
         if (!Array.isArray(candidates) || candidates.length === 0) {
-            throw new Error(`暂不支持 ${width}x${height} 的视频水印候选`);
+            throw new Error('Unsupported video watermark candidates for ' + width + 'x' + height);
         }
-        throw new Error('没有可用的视频水印检测结果');
+        throw new Error('No video watermark detection result is available');
+    }
+
+    return selected;
+}
+
+export async function detectVideoWatermarkFromFramesAsync({
+    frames,
+    width,
+    height,
+    candidates = resolveVideoWatermarkCandidates(width, height),
+    minConfidence = DEFAULT_MIN_CONFIDENCE,
+    alphaMapOptions = {},
+    veoTextOptions = {},
+    yieldToMainThread = null
+}) {
+    let diamondDetection = null;
+    if (Array.isArray(candidates) && candidates.length > 0) {
+        diamondDetection = await detectDiamondVideoWatermarkFromFramesAsync({
+            frames,
+            width,
+            height,
+            candidates,
+            minConfidence,
+            alphaMapOptions,
+            yieldToMainThread
+        });
+    }
+
+    const veoTextDetection = await detectVeoTextWatermarkFromFramesAsync({
+        frames,
+        width,
+        height,
+        ...veoTextOptions,
+        yieldToMainThread
+    });
+
+    const selected = selectVideoWatermarkDetection({
+        diamondDetection,
+        veoTextDetection
+    });
+
+    if (!selected) {
+        if (!Array.isArray(candidates) || candidates.length === 0) {
+            throw new Error('Unsupported video watermark candidates for ' + width + 'x' + height);
+        }
+        throw new Error('No video watermark detection result is available');
     }
 
     return selected;
