@@ -61,12 +61,18 @@ test('release checklists should require internal comparison and readiness gates'
     );
     assert.equal(packageJson.scripts?.['release:goal-audit'], 'node scripts/create-release-goal-audit-report.js');
     assert.equal(
+        packageJson.scripts?.['release:ci-check'],
+        'node scripts/check-github-ci.js --workflow ci.yml --commit HEAD --fail-closed'
+    );
+    assert.equal(
         packageJson.scripts?.['release:preflight'],
-        'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete'
+        'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete && pnpm release:ci-check'
     );
     assert.match(releaseEn, /pnpm release:preflight/);
     assert.match(releaseEn, /pnpm release:goal-audit/);
     assert.match(releaseEn, /pnpm release:quality-gate/);
+    assert.match(releaseEn, /pnpm release:ci-check/);
+    assert.match(releaseEn, /GitHub Actions CI/);
     assert.match(releaseEn, /internal comparison gate/);
     assert.doesNotMatch(releaseEn, /pnpm compare:allenk-v2/);
     assert.match(releaseEn, /--fail-on-incomplete/);
@@ -75,6 +81,8 @@ test('release checklists should require internal comparison and readiness gates'
     assert.match(releaseZh, /pnpm release:preflight/);
     assert.match(releaseZh, /pnpm release:goal-audit/);
     assert.match(releaseZh, /pnpm release:quality-gate/);
+    assert.match(releaseZh, /pnpm release:ci-check/);
+    assert.match(releaseZh, /GitHub Actions CI/);
     assert.match(releaseZh, /内部对比 gate/);
     assert.doesNotMatch(releaseZh, /pnpm compare:allenk-v2/);
     assert.match(releaseZh, /--fail-on-incomplete/);

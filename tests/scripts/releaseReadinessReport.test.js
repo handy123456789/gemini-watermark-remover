@@ -44,7 +44,8 @@ function releaseGateScripts(overrides = {}) {
         'release:readiness': 'node scripts/create-release-readiness-report.js',
         'release:quality-gate': 'pnpm compare:allenk-v2 -- --fail-on-incomplete && pnpm release:readiness -- --fail-on-not-ready',
         'release:goal-audit': 'node scripts/create-release-goal-audit-report.js',
-        'release:preflight': 'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete',
+        'release:ci-check': 'node scripts/check-github-ci.js --workflow ci.yml --commit HEAD --fail-closed',
+        'release:preflight': 'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete && pnpm release:ci-check',
         ...overrides
     };
 }
@@ -229,12 +230,12 @@ async function writeReleaseVersionDocs(tempDir, version = '1.2.3') {
     await writeFile(changelogZh, `# 更新日志\n\n## ${version} - 2026-06-11\n\n- Ready.\n`, 'utf8');
     await writeFile(
         releaseEn,
-        'Update CHANGELOG.md and CHANGELOG_zh.md. Run pnpm release:preflight, which runs pnpm package:extension, pnpm release:quality-gate, and pnpm release:goal-audit -- --fail-on-incomplete; the quality gate runs the internal comparison gate --fail-on-incomplete before pnpm release:readiness -- --fail-on-not-ready, then upload latest-extension.json. Follow the Release Claim Matrix: publish allowed, allowed-scoped, and allowed-safety-only rows; keep review-only, experiment-only, and forbidden rows out of public capability claims.\n',
+        'Update CHANGELOG.md and CHANGELOG_zh.md. Run pnpm release:preflight, which runs pnpm package:extension, pnpm release:quality-gate, pnpm release:goal-audit -- --fail-on-incomplete, and pnpm release:ci-check; the quality gate runs the internal comparison gate --fail-on-incomplete before pnpm release:readiness -- --fail-on-not-ready, then the CI check verifies GitHub Actions CI for the current HEAD before upload latest-extension.json. Follow the Release Claim Matrix: publish allowed, allowed-scoped, and allowed-safety-only rows; keep review-only, experiment-only, and forbidden rows out of public capability claims.\n',
         'utf8'
     );
     await writeFile(
         releaseZh,
-        '更新 CHANGELOG.md 和 CHANGELOG_zh.md。运行 pnpm release:preflight；它会运行 pnpm package:extension、pnpm release:quality-gate 和 pnpm release:goal-audit -- --fail-on-incomplete；该 quality gate 会先运行内部对比 gate --fail-on-incomplete，再运行 pnpm release:readiness -- --fail-on-not-ready；然后上传 latest-extension.json。遵循 Release Claim Matrix：只发布 allowed、allowed-scoped 和 allowed-safety-only 行；review-only、experiment-only 和 forbidden 行不能写成公开能力声明。\n',
+        '更新 CHANGELOG.md 和 CHANGELOG_zh.md。运行 pnpm release:preflight；它会运行 pnpm package:extension、pnpm release:quality-gate、pnpm release:goal-audit -- --fail-on-incomplete 和 pnpm release:ci-check；该 quality gate 会先运行内部对比 gate --fail-on-incomplete，再运行 pnpm release:readiness -- --fail-on-not-ready；随后 CI 检查会确认当前 HEAD 的 GitHub Actions CI 已通过，再上传 latest-extension.json。遵循 Release Claim Matrix：只发布 allowed、allowed-scoped 和 allowed-safety-only 行；review-only、experiment-only 和 forbidden 行不能写成公开能力声明。\n',
         'utf8'
     );
     return {

@@ -20,6 +20,7 @@ import {
     resolveInitialStandardConfig
 } from '../../src/core/watermarkConfig.js';
 import { processWatermarkImageData } from '../../src/core/watermarkProcessor.js';
+import { classifyExternalBenchmarkCase } from '../../scripts/run-external-gemini-watermark-sample-benchmark.js';
 
 test('classifyBenchmarkCase should mark skipped expected Gemini sample as missed detection', () => {
     const result = classifyBenchmarkCase({
@@ -53,6 +54,45 @@ test('classifyBenchmarkCase should separate weak suppression from residual edge 
 
     assert.equal(weakSuppression.bucket, 'weak-suppression');
     assert.equal(residualEdge.bucket, 'residual-edge');
+});
+
+test('classifyBenchmarkCase should allow conservative canonical 96px residuals that avoid over-removal', () => {
+    const result = classifyBenchmarkCase({
+        expectedGemini: true,
+        applied: true,
+        actualAnchor: { logoSize: 96, marginRight: 64, marginBottom: 64 },
+        alphaGain: 1,
+        residualScore: 0.31,
+        processedGradientScore: 0.04,
+        originalSpatialScore: 0.77,
+        originalGradientScore: 0.47,
+        suppressionGain: 0.45,
+        decisionTier: 'direct-match',
+        selectedCandidateDiagnostic: {
+            alphaAdjustmentStages: []
+        },
+        fileName: 'conservative-canonical-96.png'
+    });
+
+    assert.equal(result.status, 'pass');
+    assert.equal(result.bucket, 'pass');
+});
+
+test('classifyExternalBenchmarkCase should allow conservative canonical 96px residuals that avoid over-removal', () => {
+    const result = classifyExternalBenchmarkCase({
+        applied: true,
+        actualAnchor: { logoSize: 96, marginRight: 64, marginBottom: 64 },
+        alphaGain: 1,
+        residualScore: 0.31,
+        processedGradientScore: 0.04,
+        originalSpatialScore: 0.77,
+        originalGradientScore: 0.47,
+        suppressionGain: 0.45,
+        decisionTier: 'direct-match'
+    });
+
+    assert.equal(result.status, 'pass');
+    assert.equal(result.bucket, 'pass');
 });
 
 test('classifyBenchmarkCase should treat changed non-Gemini region as false positive', () => {

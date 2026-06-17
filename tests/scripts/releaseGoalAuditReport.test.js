@@ -22,7 +22,8 @@ function releaseScripts() {
         'release:readiness': 'node scripts/create-release-readiness-report.js',
         'release:quality-gate': 'pnpm compare:allenk-v2 -- --fail-on-incomplete && pnpm release:readiness -- --fail-on-not-ready',
         'release:goal-audit': 'node scripts/create-release-goal-audit-report.js',
-        'release:preflight': 'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete'
+        'release:ci-check': 'node scripts/check-github-ci.js --workflow ci.yml --commit HEAD --fail-closed',
+        'release:preflight': 'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete && pnpm release:ci-check'
     };
 }
 

@@ -1225,6 +1225,72 @@ test('processWatermarkImageData should remove the 2816x1536 issue #68 watermark 
     );
 });
 
+test('processWatermarkImageData should keep 2752x1536 official 2K sample on the canonical 96px anchor', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const alpha96NewMargin = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96_20260520.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples/20260616.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        alpha96Variants: {
+            '20260520': alpha96NewMargin
+        },
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size),
+        locatedAggressiveRemoval: false
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 96, marginRight: 64, marginBottom: 64 });
+    assert.deepEqual(result.meta.position, { x: 2592, y: 1376, width: 96, height: 96 });
+    assert.equal(result.meta.selectionDebug?.usedCatalogVariant, false);
+    assert.ok(
+        result.meta.detection.originalSpatialScore >= 0.7 &&
+            result.meta.detection.originalGradientScore >= 0.45,
+        `expected strong canonical original evidence, detection=${JSON.stringify(result.meta.detection)} source=${result.meta.source}`
+    );
+    assert.ok(
+        !(
+            result.meta.config?.logoSize === 96 &&
+            result.meta.config?.marginRight === 192 &&
+            result.meta.config?.marginBottom === 192
+        ),
+        `expected canonical 96px anchor to beat weak 192px-margin candidate, got ${JSON.stringify(result.meta.config)}`
+    );
+});
+
+test('processWatermarkImageData should not over-remove the 2752x1536 canonical sample with located-aggressive cleanup', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const alpha96NewMargin = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96_20260520.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples/20260616.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        alpha96Variants: {
+            '20260520': alpha96NewMargin
+        },
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 96, marginRight: 64, marginBottom: 64 });
+    assert.equal(result.meta.alphaGain, 1);
+    assert.equal(
+        result.meta.alphaAdjustmentStages?.some((stage) => stage.stage === 'located-aggressive-removal'),
+        false,
+        `expected standard-alpha residual to skip located-aggressive cleanup, stages=${JSON.stringify(result.meta.alphaAdjustmentStages)}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.05,
+        `expected standard alpha to clear the sharp watermark edge without strong-alpha cleanup, detection=${JSON.stringify(result.meta.detection)}`
+    );
+});
+
 test('processWatermarkImageData should allow strong 2752x1536 new-margin alpha evidence through flat-background hard reject', async (t) => {
     const samplePath = path.resolve('D:/Project/sample-files/gemini-watermark/2026-06-09/2064208514779189248-source.png');
     try {
@@ -1351,6 +1417,45 @@ test('processWatermarkImageData should keep 1696x2518 portrait sample on the ful
         Math.abs(result.meta.detection.processedSpatialScore) <= 0.04 &&
             result.meta.detection.processedGradientScore <= 0.04,
         `expected low residual on full 96px anchor, detection=${JSON.stringify(result.meta.detection)}`
+    );
+});
+
+test('processWatermarkImageData should repair smooth off-catalog located residuals with an estimated alpha prior', async (t) => {
+    const samplePath = path.resolve('D:/Project/sample-files/gemini-watermark/2026-06-09/2064239698053697536-source.png');
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external smooth off-catalog residual sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const alpha96NewMargin = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96_20260520.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        alpha96Variants: {
+            '20260520': alpha96NewMargin
+        },
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.position, { x: 2401, y: 1263, width: 125, height: 125 });
+    assert.ok(
+        String(result.meta.source).includes('+smooth-prior'),
+        `expected smooth prior cleanup, source=${result.meta.source}, stages=${JSON.stringify(result.meta.alphaAdjustmentStages)}`
+    );
+    assert.ok(
+        Math.abs(result.meta.detection.processedSpatialScore) <= 0.08,
+        `expected low residual spatial, detection=${JSON.stringify(result.meta.detection)}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.18,
+        `expected bounded residual gradient, detection=${JSON.stringify(result.meta.detection)}`
     );
 });
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { access, readdir } from 'node:fs/promises';
+import { access, readFile, readdir } from 'node:fs/promises';
 
 import { chromium } from 'playwright';
 
@@ -58,6 +58,18 @@ const MAX_NEAR_BLACK_RATIO_INCREASE = 0.05;
 const SUBPIXEL_SHIFTS = [-0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75];
 const SUBPIXEL_SCALES = [0.98, 0.99, 1, 1.01, 1.02];
 const FIXED_CORE_UNSUPPORTED_SAMPLE_ASSETS = new Set();
+
+async function loadSampleGoldManifest() {
+    try {
+        const manifest = JSON.parse(await readFile(path.join(SAMPLE_DIR, 'gold-manifest.json'), 'utf8'));
+        return manifest.samples && typeof manifest.samples === 'object'
+            ? manifest.samples
+            : {};
+    } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+        return {};
+    }
+}
 
 async function ensureSampleAssetAvailable(t, fileName) {
     try {
@@ -588,6 +600,7 @@ function removeWatermarkLikeEngine(imageData, alpha48, alpha96, alpha96NewMargin
 
 test('known Gemini sample assets should show strong watermark suppression after processing', async (t) => {
     const files = await listSampleAssetFiles();
+    const goldManifest = await loadSampleGoldManifest();
 
     assert.ok(files.length > 0, 'known Gemini sample asset list should not be empty');
 
@@ -627,10 +640,19 @@ test('known Gemini sample assets should show strong watermark suppression after 
                 !result.skipped,
                 `${fileName}: expected processing pipeline to accept sample, spatial=${result.beforeScore}, gradient=${result.beforeGradient}`
             );
-            assert.ok(
-                result.afterScore < 0.22,
-                `${fileName}: expected residual signal after processing < 0.22, got ${result.afterScore}`
-            );
+            const gold = goldManifest[fileName] ?? {};
+            const allowsWeakResidual = gold.allowWeakResidual === true;
+            if (allowsWeakResidual) {
+                assert.ok(
+                    result.afterScore < 0.35,
+                    `${fileName}: expected bounded allowed residual signal after processing < 0.35, got ${result.afterScore}`
+                );
+            } else {
+                assert.ok(
+                    result.afterScore < 0.22,
+                    `${fileName}: expected residual signal after processing < 0.22, got ${result.afterScore}`
+                );
+            }
             assert.ok(
                 result.improvement >= 0.3 || result.afterScore < 0.05,
                 `${fileName}: expected strong suppression gain or near-zero residual, gain=${result.improvement}, residual=${result.afterScore}`

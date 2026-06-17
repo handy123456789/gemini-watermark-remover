@@ -134,7 +134,8 @@ const BLOCKED_CAPABILITY_INVARIANTS = Object.freeze({
 const BLOCKED_CAPABILITY_DECISIONS = Object.freeze(new Set(['blocked', 'experiment-only']));
 const RELEASE_QUALITY_GATE_SCRIPT = 'pnpm compare:allenk-v2 -- --fail-on-incomplete && pnpm release:readiness -- --fail-on-not-ready';
 const RELEASE_GOAL_AUDIT_SCRIPT = 'node scripts/create-release-goal-audit-report.js';
-const RELEASE_PREFLIGHT_SCRIPT = 'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete';
+const RELEASE_CI_CHECK_SCRIPT = 'node scripts/check-github-ci.js --workflow ci.yml --commit HEAD --fail-closed';
+const RELEASE_PREFLIGHT_SCRIPT = 'pnpm test && pnpm build && pnpm package:extension && pnpm release:quality-gate && pnpm release:goal-audit -- --fail-on-incomplete && pnpm release:ci-check';
 const RELEASE_READY_RECOMMENDATION = 'rc-current-image-defaults-with-scoped-claims';
 
 function isObject(value) {
@@ -372,6 +373,7 @@ function summarizePackage(packageArtifact, latestExtensionArtifact, { gitStatusT
     const allenkV2ComparisonScriptReady = pkg.scripts?.['compare:allenk-v2'] === 'node scripts/create-allenk-v2-comparison-report.js';
     const releaseQualityGateScriptReady = pkg.scripts?.['release:quality-gate'] === RELEASE_QUALITY_GATE_SCRIPT;
     const releaseGoalAuditScriptReady = pkg.scripts?.['release:goal-audit'] === RELEASE_GOAL_AUDIT_SCRIPT;
+    const releaseCiCheckScriptReady = pkg.scripts?.['release:ci-check'] === RELEASE_CI_CHECK_SCRIPT;
     const releasePreflightScriptReady = pkg.scripts?.['release:preflight'] === RELEASE_PREFLIGHT_SCRIPT;
     const releaseFreshness = summarizeGitReleaseFreshness({
         gitStatusText,
@@ -395,6 +397,7 @@ function summarizePackage(packageArtifact, latestExtensionArtifact, { gitStatusT
     if (!allenkV2ComparisonScriptReady) blockers.push('allenk-v2-comparison-script-missing');
     if (!releaseQualityGateScriptReady) blockers.push('release-quality-gate-script-missing');
     if (!releaseGoalAuditScriptReady) blockers.push('release-goal-audit-script-missing');
+    if (!releaseCiCheckScriptReady) blockers.push('release-ci-check-script-missing');
     if (!releasePreflightScriptReady) blockers.push('release-preflight-script-missing');
     if (!releaseFreshness.gitStatusAvailable) blockers.push('git-status-unavailable');
     if (releaseFreshness.dirtyBuildInputsNewerThanZip) blockers.push('release-build-inputs-dirty-rebuild-required');
@@ -423,6 +426,7 @@ function summarizePackage(packageArtifact, latestExtensionArtifact, { gitStatusT
             allenkV2ComparisonScriptReady,
             releaseQualityGateScriptReady,
             releaseGoalAuditScriptReady,
+            releaseCiCheckScriptReady,
             releasePreflightScriptReady,
             releaseFreshness
         },

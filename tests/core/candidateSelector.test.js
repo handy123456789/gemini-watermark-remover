@@ -635,6 +635,42 @@ test('pickBetterCandidate should use rankingKey for same-anchor local alpha choi
     assert.equal(selected, safeCandidate);
 });
 
+test('pickBetterCandidate should preserve standard alpha when stronger same-anchor gain risks dark over-removal', () => {
+    const standardAlphaCandidate = {
+        accepted: true,
+        source: 'standard',
+        config: { logoSize: 96, marginRight: 64, marginBottom: 64 },
+        position: { x: 2592, y: 1376, width: 96, height: 96 },
+        alphaGain: 1,
+        originalSpatialScore: 0.77,
+        originalGradientScore: 0.47,
+        processedSpatialScore: 0.31,
+        processedGradientScore: 0.04,
+        improvement: 0.46,
+        validationCost: 0.34,
+        rankingKey: [0, -3, 1, 0.34, 1, 0.9]
+    };
+    const strongDarkCandidate = {
+        ...standardAlphaCandidate,
+        alphaGain: 1.15,
+        processedSpatialScore: 0.14,
+        processedGradientScore: 0.13,
+        improvement: 0.63,
+        tooDark: true,
+        validationCost: 0.22,
+        rankingKey: [0, -3, 1, 0.22, 3, 0.97]
+    };
+
+    assert.equal(
+        pickBetterCandidate(standardAlphaCandidate, strongDarkCandidate, 0.002),
+        standardAlphaCandidate
+    );
+    assert.equal(
+        pickBetterCandidate(strongDarkCandidate, standardAlphaCandidate, 0.002),
+        standardAlphaCandidate
+    );
+});
+
 test('pickBetterCandidate should not apply same-anchor rankingKey migration to preview-anchor fallbacks', () => {
     const position = { x: 720, y: 480, width: 34, height: 34 };
     const config = { logoSize: 34, marginRight: 24, marginBottom: 24 };

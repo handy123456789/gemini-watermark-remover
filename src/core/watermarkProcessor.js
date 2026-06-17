@@ -24,6 +24,10 @@ import {
     detectWatermarkConfig,
     resolveInitialStandardConfig
 } from './watermarkConfig.js';
+import {
+    blurAlphaMap,
+    buildPreviewNeighborhoodPrior
+} from './previewAlphaCalibration.js';
 
 const RESIDUAL_RECALIBRATION_THRESHOLD = 0.5;
 const MIN_SUPPRESSION_FOR_SKIP_RECALIBRATION = 0.18;
@@ -36,6 +40,7 @@ const SUBPIXEL_REFINE_SCALES = [0.99, 1, 1.01];
 const ALPHA_PARAMETER_GROUPS = Object.freeze([
     { name: 'gemini-weak-alpha-202606', alphaGain: 0.6, standardPriority: true },
     { name: 'gemini-standard-alpha', alphaGain: 1, standardPriority: true },
+    { name: 'gemini-balanced-strong-alpha-202606', alphaGain: 1.1 },
     { name: 'gemini-strong-alpha-202606', alphaGain: 1.15 },
     { name: 'gemini-strong-alpha-high-202606', alphaGain: 1.3 },
     { name: 'weak-alpha-extra-conservative', alphaGain: 0.45 },
@@ -136,6 +141,21 @@ const PREVIEW_BACKGROUND_CLEANUP_MIN_RESIDUAL = 0.3;
 const PREVIEW_BACKGROUND_CLEANUP_MAX_BORDER_STD = 24;
 const PREVIEW_BACKGROUND_CLEANUP_PAD = 8;
 const PREVIEW_BACKGROUND_CLEANUP_PRIOR_RADIUS = 10;
+const SMOOTH_PRIOR_LOCATED_MIN_SIZE = 80;
+const SMOOTH_PRIOR_LOCATED_MAX_SIZE = 160;
+const SMOOTH_PRIOR_LOCATED_MIN_BORDER_MEAN = 120;
+const SMOOTH_PRIOR_LOCATED_MIN_SPATIAL = 0.25;
+const SMOOTH_PRIOR_LOCATED_MAX_GRADIENT = 0.22;
+const SMOOTH_PRIOR_LOCATED_MIN_SPATIAL_IMPROVEMENT = 0.16;
+const SMOOTH_PRIOR_LOCATED_MAX_GRADIENT_DRIFT = 0.05;
+const SMOOTH_PRIOR_LOCATED_MIN_ARTIFACT_IMPROVEMENT = 0.025;
+const SMOOTH_PRIOR_LOCATED_MAX_ACCEPTED_GRADIENT = 0.18;
+const SMOOTH_PRIOR_LOCATED_PRESETS = Object.freeze([
+    { radius: 24, threshold: 0, blurRadius: 0, strength: 0.75, gamma: 0.45 },
+    { radius: 36, threshold: 0, blurRadius: 0, strength: 0.75, gamma: 0.45 },
+    { radius: 24, threshold: 0.01, blurRadius: 0, strength: 0.75, gamma: 0.45 },
+    { radius: 36, threshold: 0.01, blurRadius: 0, strength: 0.75, gamma: 0.45 }
+]);
 const OVER_SUBTRACTION_SPATIAL_THRESHOLD = -0.25;
 const OVER_SUBTRACTION_GRADIENT_THRESHOLD = 0.35;
 const OVER_SUBTRACTION_MIN_ABS_SPATIAL_IMPROVEMENT = 0.08;
@@ -1370,7 +1390,7 @@ function expandPosition(position, imageData, pad) {
     };
 }
 
-function measureOuterBorderLuminanceStd(imageData, position, margin = 10) {
+function measureOuterBorderLuminanceStats(imageData, position, margin = 10) {
     let sum = 0;
     let sq = 0;
     let count = 0;
@@ -1399,14 +1419,217 @@ function measureOuterBorderLuminanceStd(imageData, position, margin = 10) {
         }
     }
 
-    if (count <= 0) return Number.POSITIVE_INFINITY;
+    if (count <= 0) {
+        return {
+            mean: Number.POSITIVE_INFINITY,
+            std: Number.POSITIVE_INFINITY,
+            count
+        };
+    }
 
     const mean = sum / count;
-    return Math.sqrt(Math.max(0, sq / count - mean * mean));
+    return {
+        mean,
+        std: Math.sqrt(Math.max(0, sq / count - mean * mean)),
+        count
+    };
+}
+
+function measureOuterBorderLuminanceStd(imageData, position, margin = 10) {
+    return measureOuterBorderLuminanceStats(imageData, position, margin).std;
+}
+
+function clamp01(value) {
+    if (!Number.isFinite(value)) return 0;
+    if (value <= 0) return 0;
+    if (value >= 1) return 1;
+    return value;
 }
 
 function clampChannel(value) {
     return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function estimateAlphaMapFromBackgroundPrior({
+    originalImageData,
+    priorImageData,
+    position,
+    threshold,
+    blurRadius
+}) {
+    const alphaMap = new Float32Array(position.width * position.height);
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const localIndex = row * position.width + col;
+            const pixelIndex = ((position.y + row) * originalImageData.width + position.x + col) * 4;
+            let estimatedAlpha = 0;
+
+            for (let channel = 0; channel < 3; channel++) {
+                const denominator = 255 - priorImageData.data[pixelIndex + channel];
+                if (denominator <= 2) continue;
+
+                estimatedAlpha = Math.max(
+                    estimatedAlpha,
+                    (originalImageData.data[pixelIndex + channel] - priorImageData.data[pixelIndex + channel]) / denominator
+                );
+            }
+
+            alphaMap[localIndex] = Math.min(0.9, clamp01((estimatedAlpha - threshold) * 1.2));
+        }
+    }
+
+    return blurRadius > 0
+        ? blurAlphaMap(alphaMap, position.width, blurRadius)
+        : alphaMap;
+}
+
+function applyEstimatedPriorBlend({
+    sourceImageData,
+    priorImageData,
+    estimatedAlphaMap,
+    position,
+    strength,
+    gamma
+}) {
+    const candidate = cloneImageData(sourceImageData);
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const localIndex = row * position.width + col;
+            const alpha = estimatedAlphaMap[localIndex];
+            if (alpha <= 0.005) continue;
+
+            const blend = clamp01(Math.pow(alpha, gamma) * strength);
+            if (blend <= 0.005) continue;
+
+            const pixelIndex = ((position.y + row) * sourceImageData.width + position.x + col) * 4;
+            for (let channel = 0; channel < 3; channel++) {
+                candidate.data[pixelIndex + channel] = clampChannel(
+                    sourceImageData.data[pixelIndex + channel] * (1 - blend) +
+                    priorImageData.data[pixelIndex + channel] * blend
+                );
+            }
+        }
+    }
+
+    return candidate;
+}
+
+function refineSmoothLocatedResidualWithEstimatedPrior({
+    originalImageData,
+    currentImageData,
+    alphaMap,
+    position,
+    source,
+    alphaGain,
+    baselineSpatialScore,
+    baselineGradientScore
+}) {
+    if (
+        typeof source !== 'string' ||
+        !source.includes('located-aggressive') ||
+        position?.width < SMOOTH_PRIOR_LOCATED_MIN_SIZE ||
+        position?.width > SMOOTH_PRIOR_LOCATED_MAX_SIZE ||
+        baselineSpatialScore < SMOOTH_PRIOR_LOCATED_MIN_SPATIAL ||
+        baselineGradientScore > SMOOTH_PRIOR_LOCATED_MAX_GRADIENT
+    ) {
+        return null;
+    }
+
+    const borderStats = measureOuterBorderLuminanceStats(originalImageData, position, 16);
+    if (borderStats.mean < SMOOTH_PRIOR_LOCATED_MIN_BORDER_MEAN) {
+        return null;
+    }
+
+    const baselineArtifacts = assessRemovalDiffArtifacts({
+        originalImageData,
+        candidateImageData: currentImageData,
+        alphaMap,
+        position,
+        alphaGain
+    });
+    const baselineArtifactCost = Number(baselineArtifacts?.visualArtifactCost);
+    if (!Number.isFinite(baselineArtifactCost)) return null;
+
+    let best = null;
+    const priorByRadius = new Map();
+
+    for (const preset of SMOOTH_PRIOR_LOCATED_PRESETS) {
+        let priorImageData = priorByRadius.get(preset.radius);
+        if (!priorImageData) {
+            priorImageData = buildPreviewNeighborhoodPrior({
+                previewImageData: originalImageData,
+                position,
+                radius: preset.radius
+            });
+            priorByRadius.set(preset.radius, priorImageData);
+        }
+
+        const estimatedAlphaMap = estimateAlphaMapFromBackgroundPrior({
+            originalImageData,
+            priorImageData,
+            position,
+            threshold: preset.threshold,
+            blurRadius: preset.blurRadius
+        });
+        const candidateImageData = applyEstimatedPriorBlend({
+            sourceImageData: currentImageData,
+            priorImageData,
+            estimatedAlphaMap,
+            position,
+            strength: preset.strength,
+            gamma: preset.gamma
+        });
+        const spatialScore = computeRegionSpatialCorrelation({
+            imageData: candidateImageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const gradientScore = computeRegionGradientCorrelation({
+            imageData: candidateImageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const artifacts = assessRemovalDiffArtifacts({
+            originalImageData,
+            candidateImageData,
+            alphaMap,
+            position,
+            alphaGain
+        });
+        const artifactCost = Number(artifacts?.visualArtifactCost);
+        if (!Number.isFinite(artifactCost)) continue;
+
+        const spatialImprovement = Math.abs(baselineSpatialScore) - Math.abs(spatialScore);
+        const gradientDrift = gradientScore - baselineGradientScore;
+        const artifactImprovement = baselineArtifactCost - artifactCost;
+        if (
+            spatialImprovement < SMOOTH_PRIOR_LOCATED_MIN_SPATIAL_IMPROVEMENT ||
+            gradientDrift > SMOOTH_PRIOR_LOCATED_MAX_GRADIENT_DRIFT ||
+            artifactImprovement < SMOOTH_PRIOR_LOCATED_MIN_ARTIFACT_IMPROVEMENT ||
+            gradientScore > SMOOTH_PRIOR_LOCATED_MAX_ACCEPTED_GRADIENT
+        ) {
+            continue;
+        }
+
+        const cost = Math.abs(spatialScore) * 0.75 +
+            Math.max(0, gradientScore) * 0.9 +
+            artifactCost * 0.5;
+        if (!best || cost < best.cost) {
+            best = {
+                imageData: candidateImageData,
+                spatialScore,
+                gradientScore,
+                cost,
+                artifactCost,
+                borderStats,
+                preset
+            };
+        }
+    }
+
+    return best;
 }
 
 function averageStripColor(imageData, {
@@ -1871,6 +2094,53 @@ function refineLocatedAggressiveRemoval({
 
     if (best.imageData === currentImageData) return null;
     return best;
+}
+
+function shouldSkipLocatedAggressiveForCleanCanonical96({
+    config,
+    alphaGain,
+    originalSpatialScore,
+    originalGradientScore,
+    currentSpatialScore,
+    currentGradientScore
+}) {
+    if (
+        config?.logoSize !== 96 ||
+        config.marginRight !== 64 ||
+        config.marginBottom !== 64
+    ) {
+        return false;
+    }
+
+    const resolvedAlphaGain = Number(alphaGain);
+    const originalSpatial = Number(originalSpatialScore);
+    const originalGradient = Number(originalGradientScore);
+    const currentSpatial = Number(currentSpatialScore);
+    const currentGradient = Number(currentGradientScore);
+    if (
+        !Number.isFinite(resolvedAlphaGain) ||
+        !Number.isFinite(originalSpatial) ||
+        !Number.isFinite(originalGradient) ||
+        !Number.isFinite(currentSpatial) ||
+        !Number.isFinite(currentGradient)
+    ) {
+        return false;
+    }
+
+    const cleanStandardAlpha =
+        resolvedAlphaGain <= 1 &&
+        currentSpatial >= 0 &&
+        currentSpatial <= 0.35 &&
+        Math.max(0, currentGradient) <= 0.08;
+    const cleanBalancedAlpha =
+        resolvedAlphaGain <= 1.1 &&
+        currentSpatial >= 0 &&
+        currentSpatial <= 0.22 &&
+        Math.max(0, currentGradient) <= 0.1;
+
+    return originalSpatial >= 0.55 &&
+        originalGradient >= 0.2 &&
+        (cleanStandardAlpha || cleanBalancedAlpha);
 }
 
 function shouldRelocateSmallFixedLocalAnchor({
@@ -2784,9 +3054,23 @@ export function processWatermarkImageData(imageData, options = {}) {
     }
 
     const locatedAggressiveStartedAt = nowMs();
+    const locatedAggressiveResidualVisibility = assessWatermarkResidualVisibility({
+        imageData: finalImageData,
+        position,
+        alphaMap
+    });
     if (
         options.locatedAggressiveRemoval !== false &&
-        smallFixedLocalRelocated?.residualVisibility?.visible !== false
+        smallFixedLocalRelocated?.residualVisibility?.visible !== false &&
+        locatedAggressiveResidualVisibility?.visible !== false &&
+        !shouldSkipLocatedAggressiveForCleanCanonical96({
+            config,
+            alphaGain,
+            originalSpatialScore,
+            originalGradientScore,
+            currentSpatialScore: finalProcessedSpatialScore,
+            currentGradientScore: finalProcessedGradientScore
+        })
     ) {
         const aggressiveRefined = refineLocatedAggressiveRemoval({
             originalImageData,
@@ -2835,10 +3119,42 @@ export function processWatermarkImageData(imageData, options = {}) {
                 : `${source}+located-aggressive`;
         }
     }
+
+    const smoothPriorStartedAt = nowMs();
+    const smoothPriorRefined = refineSmoothLocatedResidualWithEstimatedPrior({
+        originalImageData,
+        currentImageData: finalImageData,
+        alphaMap,
+        position,
+        source,
+        alphaGain,
+        baselineSpatialScore: finalProcessedSpatialScore,
+        baselineGradientScore: finalProcessedGradientScore
+    });
+    if (smoothPriorRefined) {
+        recordAlphaAdjustmentStage({
+            stage: 'smooth-located-estimated-prior',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: smoothPriorRefined.spatialScore,
+            afterGradientScore: smoothPriorRefined.gradientScore,
+            suppressionGain: originalSpatialScore - smoothPriorRefined.spatialScore,
+            cost: smoothPriorRefined.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = smoothPriorRefined.imageData;
+        finalProcessedSpatialScore = smoothPriorRefined.spatialScore;
+        finalProcessedGradientScore = smoothPriorRefined.gradientScore;
+        suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
+        source = `${source}+smooth-prior`;
+    }
     if (debugTimingsEnabled) {
         debugTimings.previewEdgeCleanupMs = previewEdgeCleanupElapsedMs;
         debugTimings.smallPreviewRefinementMs = nowMs() - smallPreviewRefinementStartedAt;
         debugTimings.locatedAggressiveRemovalMs = nowMs() - locatedAggressiveStartedAt;
+        debugTimings.smoothPriorCleanupMs = nowMs() - smoothPriorStartedAt;
         debugTimings.totalMs = nowMs() - totalStartedAt;
     }
 

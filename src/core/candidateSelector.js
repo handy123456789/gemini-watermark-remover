@@ -139,7 +139,7 @@ const PREVIEW_TEMPLATE_ALIGN_SHIFTS = [-1, -0.5, 0, 0.5, 1];
 const PREVIEW_TEMPLATE_ALIGN_SCALES = [0.985, 1, 1.015];
 const PREVIEW_ANCHOR_GAIN_SKIP_RESIDUAL_THRESHOLD = 0.22;
 const PREVIEW_ANCHOR_GAIN_SKIP_GRADIENT_THRESHOLD = 0.24;
-const CORE_ALPHA_PRIORITY_GAINS = Object.freeze([0.6, 1, 1.15, 1.3, 0.45, 0.7, 0.85, 0.55]);
+const CORE_ALPHA_PRIORITY_GAINS = Object.freeze([0.6, 1, 1.1, 1.15, 1.3, 0.45, 0.7, 0.85, 0.55]);
 const CURRENT_LARGE_MARGIN_ULTRA_WEAK_ALPHA_GAINS = Object.freeze([0.25, 0.3, 0.35, 0.4]);
 const STANDARD_ANCHOR_WEAK_ALPHA_RESCUE_GAINS = Object.freeze([0.55, 0.7, 0.85]);
 const STANDARD_ANCHOR_WEAK_RESCUE_MAX_SPATIAL = 0.35;
@@ -1044,6 +1044,24 @@ export function pickBetterCandidate(currentBest, candidate, minCostDelta = 0.005
     if (shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(candidate, currentBest)) {
         return candidate;
     }
+    if (shouldPreserveStrongCanonical96AgainstWeakNewMargin(currentBest, candidate)) {
+        return currentBest;
+    }
+    if (shouldPreserveStrongCanonical96AgainstWeakNewMargin(candidate, currentBest)) {
+        return candidate;
+    }
+    if (shouldPreserveStandardAlphaCanonical96AgainstDarkGain(currentBest, candidate)) {
+        return currentBest;
+    }
+    if (shouldPreserveStandardAlphaCanonical96AgainstDarkGain(candidate, currentBest)) {
+        return candidate;
+    }
+    if (shouldPreserveBalancedAlphaCanonical96(currentBest, candidate)) {
+        return currentBest;
+    }
+    if (shouldPreserveBalancedAlphaCanonical96(candidate, currentBest)) {
+        return candidate;
+    }
     if (shouldPreferCatalogOriginalSignal(candidate, currentBest)) {
         return candidate;
     }
@@ -1198,6 +1216,16 @@ function isDefault96GeometryCandidate(candidate) {
         candidate.config.marginBottom === 64;
 }
 
+function isNewMargin96Candidate(candidate) {
+    return isStandardCandidateSource(candidate) &&
+        candidate?.provenance?.localShift !== true &&
+        candidate?.provenance?.sizeJitter !== true &&
+        candidate?.provenance?.previewAnchor !== true &&
+        candidate?.config?.logoSize === 96 &&
+        candidate.config.marginRight === 192 &&
+        candidate.config.marginBottom === 192;
+}
+
 function shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(currentBest, candidate) {
     if (!isCanonicalDefault96Candidate(currentBest)) return false;
     if (!isCurrentLargeMarginCatalogCandidate(candidate)) return false;
@@ -1236,6 +1264,111 @@ function shouldPreserveStrongCanonical96AgainstWeakCurrentLargeMargin(currentBes
         currentGradient >= 0.2 &&
         (currentAlreadyCleared || currentStrongLowResidual) &&
         candidateHasWeakOriginalSignal;
+}
+
+function shouldPreserveStrongCanonical96AgainstWeakNewMargin(currentBest, candidate) {
+    if (!isCanonicalDefault96Candidate(currentBest)) return false;
+    if (!isNewMargin96Candidate(candidate)) return false;
+
+    const currentSpatial = Number(currentBest.originalSpatialScore);
+    const currentGradient = Number(currentBest.originalGradientScore);
+    const candidateSpatial = Number(candidate.originalSpatialScore);
+    const candidateGradient = Number(candidate.originalGradientScore);
+    if (
+        !Number.isFinite(currentSpatial) ||
+        !Number.isFinite(currentGradient) ||
+        !Number.isFinite(candidateSpatial) ||
+        !Number.isFinite(candidateGradient)
+    ) {
+        return false;
+    }
+
+    const currentHasStrongCanonicalSignal =
+        currentSpatial >= 0.55 &&
+        currentGradient >= 0.2;
+    const candidateHasStrongNewMarginSignal =
+        candidateSpatial >= 0.55 &&
+        candidateGradient >= 0.3;
+    const candidateHasWeakOrMuchWeakerSignal =
+        candidateSpatial < STANDARD_VALIDATION_MIN_ORIGINAL_SPATIAL_SCORE ||
+        candidateGradient < STANDARD_VALIDATION_MIN_ORIGINAL_GRADIENT_SCORE ||
+        (
+            candidateSpatial <= currentSpatial - STRONG_ORIGINAL_SIGNAL_SPATIAL_ADVANTAGE &&
+            candidateGradient <= currentGradient - STRONG_ORIGINAL_SIGNAL_GRADIENT_ADVANTAGE
+        );
+
+    return currentHasStrongCanonicalSignal &&
+        !candidateHasStrongNewMarginSignal &&
+        candidateHasWeakOrMuchWeakerSignal;
+}
+
+function isBalancedCanonical96AlphaGain(candidate) {
+    const alphaGain = Number(candidate?.alphaGain);
+    return Number.isFinite(alphaGain) && alphaGain >= 1 && alphaGain <= 1.1;
+}
+
+function shouldPreserveStandardAlphaCanonical96AgainstDarkGain(currentBest, candidate) {
+    if (!sameCandidateAnchor(currentBest, candidate)) return false;
+    if (!isCanonicalDefault96Candidate(currentBest)) return false;
+
+    const currentAlphaGain = Number(currentBest?.alphaGain);
+    const candidateAlphaGain = Number(candidate?.alphaGain);
+    if (
+        !Number.isFinite(currentAlphaGain) ||
+        !Number.isFinite(candidateAlphaGain) ||
+        currentAlphaGain !== 1 ||
+        candidateAlphaGain <= 1 ||
+        candidate?.tooDark !== true
+    ) {
+        return false;
+    }
+
+    const originalSpatial = Number(currentBest.originalSpatialScore);
+    const originalGradient = Number(currentBest.originalGradientScore);
+    const currentSpatial = Number(currentBest.processedSpatialScore);
+    const currentGradient = Number(currentBest.processedGradientScore);
+    if (
+        !Number.isFinite(originalSpatial) ||
+        !Number.isFinite(originalGradient) ||
+        !Number.isFinite(currentSpatial) ||
+        !Number.isFinite(currentGradient)
+    ) {
+        return false;
+    }
+
+    return originalSpatial >= 0.55 &&
+        originalGradient >= 0.2 &&
+        currentSpatial >= 0 &&
+        currentSpatial <= 0.35 &&
+        Math.max(0, currentGradient) <= 0.08;
+}
+
+function shouldPreserveBalancedAlphaCanonical96(currentBest, candidate) {
+    if (!sameCandidateAnchor(currentBest, candidate)) return false;
+    if (!isCanonicalDefault96Candidate(currentBest)) return false;
+    if (!isBalancedCanonical96AlphaGain(currentBest)) return false;
+
+    const candidateAlphaGain = Number(candidate?.alphaGain);
+    if (!Number.isFinite(candidateAlphaGain) || candidateAlphaGain <= 1.1) return false;
+
+    const originalSpatial = Number(currentBest.originalSpatialScore);
+    const originalGradient = Number(currentBest.originalGradientScore);
+    const currentSpatial = Number(currentBest.processedSpatialScore);
+    const currentGradient = Number(currentBest.processedGradientScore);
+    if (
+        !Number.isFinite(originalSpatial) ||
+        !Number.isFinite(originalGradient) ||
+        !Number.isFinite(currentSpatial) ||
+        !Number.isFinite(currentGradient)
+    ) {
+        return false;
+    }
+
+    return originalSpatial >= 0.55 &&
+        originalGradient >= 0.2 &&
+        currentSpatial >= 0 &&
+        currentSpatial <= 0.22 &&
+        Math.max(0, currentGradient) <= 0.1;
 }
 
 function hasWeakDriftEvidence(candidate) {
