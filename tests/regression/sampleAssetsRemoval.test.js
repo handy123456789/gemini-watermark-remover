@@ -642,6 +642,12 @@ test('known Gemini sample assets should show strong watermark suppression after 
             );
             const gold = goldManifest[fileName] ?? {};
             const allowsWeakResidual = gold.allowWeakResidual === true;
+            const tags = Array.isArray(gold.tags) ? gold.tags : [];
+            const allowsModerateSignalStandardAlpha =
+                tags.includes('moderate-signal-standard-alpha') &&
+                result.alphaGain <= 1 &&
+                result.afterScore < 0.22 &&
+                result.afterGradient <= 0.02;
             if (allowsWeakResidual) {
                 assert.ok(
                     result.afterScore < 0.35,
@@ -654,7 +660,7 @@ test('known Gemini sample assets should show strong watermark suppression after 
                 );
             }
             assert.ok(
-                result.improvement >= 0.3 || result.afterScore < 0.05,
+                result.improvement >= 0.3 || result.afterScore < 0.05 || allowsModerateSignalStandardAlpha,
                 `${fileName}: expected strong suppression gain or near-zero residual, gain=${result.improvement}, residual=${result.afterScore}`
             );
             if (result.alphaGain > 1) {
@@ -745,6 +751,57 @@ test('low-contrast catalog watermarks should use conservative removal instead of
                 `${item.fileName} expected conservative residual, detection=${JSON.stringify(result.meta.detection)}`
             );
         }
+    } finally {
+        await browser.close();
+    }
+});
+
+test('20260617.png should avoid canonical 96 aggressive oversubtraction', async (t) => {
+    if (!await ensureSampleAssetAvailable(t, '20260617.png')) return;
+
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+    } catch (error) {
+        if (isMissingPlaywrightExecutableError(error)) {
+            t.skip('Playwright browser binaries are missing in this environment');
+            return;
+        }
+        throw error;
+    }
+
+    const page = await browser.newPage();
+
+    try {
+        const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
+        const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
+        const filePath = path.join(SAMPLE_DIR, '20260617.png');
+        const imageData = await decodeImageDataInPage(page, filePath);
+        const result = processWatermarkImageData(imageData, {
+            alpha48,
+            alpha96,
+            getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
+        });
+
+        assert.equal(result.meta.applied, true, 'expected 20260617.png to enter removal pipeline');
+        assert.deepEqual(
+            result.meta.config,
+            { logoSize: 96, marginRight: 64, marginBottom: 64 },
+            `expected canonical 96px anchor, got ${JSON.stringify(result.meta.config)}`
+        );
+        assert.equal(result.meta.alphaGain, 1, `expected standard alpha, got ${result.meta.alphaGain}`);
+        assert.ok(
+            !String(result.meta.source).includes('located-aggressive'),
+            `expected standard removal to avoid aggressive dark-star oversubtraction, source=${result.meta.source}`
+        );
+        assert.ok(
+            result.meta.detection.processedGradientScore <= 0.02,
+            `expected standard alpha to keep edge residual low, detection=${JSON.stringify(result.meta.detection)}`
+        );
+        assert.ok(
+            result.meta.detection.processedSpatialScore <= 0.26,
+            `expected bounded standard-alpha residual, detection=${JSON.stringify(result.meta.detection)}`
+        );
     } finally {
         await browser.close();
     }

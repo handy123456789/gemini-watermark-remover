@@ -2,6 +2,7 @@ import { removeWatermark } from './blendModes.js';
 import {
     computeRegionGradientCorrelation,
     computeRegionSpatialCorrelation,
+    interpolateAlphaMap,
     warpAlphaMap
 } from './adaptiveDetector.js';
 import {
@@ -15,6 +16,7 @@ import {
 } from './candidateSelector.js';
 import {
     assessAlphaBandHalo,
+    assessCalibratedWatermarkResidualVisibility,
     assessRemovalDiffArtifacts,
     assessWatermarkResidualVisibility
 } from './restorationMetrics.js';
@@ -24,6 +26,7 @@ import {
     detectWatermarkConfig,
     resolveInitialStandardConfig
 } from './watermarkConfig.js';
+import { scoreBalancedVisualCandidate } from './watermarkScoring.js';
 import {
     blurAlphaMap,
     buildPreviewNeighborhoodPrior
@@ -50,6 +53,7 @@ const ALPHA_PARAMETER_GROUPS = Object.freeze([
 ]);
 const ALPHA_GAIN_CANDIDATES = ALPHA_PARAMETER_GROUPS.map((group) => group.alphaGain);
 const LOCATED_AGGRESSIVE_ALPHA_GAINS = Object.freeze([0.85, 1, 1.15, 1.3, 1.45, 1.7, 2, 2.4]);
+const LOCATED_AGGRESSIVE_MIN_BALANCED_GAIN = 0.015;
 const ENABLE_VISUAL_POST_PROCESSING = false;
 const CATALOG_DARK_ALPHA_GAIN_CANDIDATES = Object.freeze([0.9, 0.85, 0.8, 0.95, 0.7, 0.6]);
 const STANDARD_ALPHA_PRIORITY_GAINS = ALPHA_PARAMETER_GROUPS
@@ -174,6 +178,10 @@ const STRONG_POSITIVE_FINE_TUNE_EXTRA_GAINS = Object.freeze([0.95, 1]);
 const STRONG_POSITIVE_FINE_TUNE_MAX_ACCEPTED_SPATIAL = 0.12;
 const STRONG_POSITIVE_FINE_TUNE_MAX_ACCEPTED_GRADIENT = 0.25;
 const STRONG_POSITIVE_FINE_TUNE_MAX_POSITIVE_HALO_LUM = 4;
+const CANONICAL_96_MODERATE_SIGNAL_MIN_ORIGINAL_SPATIAL = 0.4;
+const CANONICAL_96_MODERATE_SIGNAL_MIN_ORIGINAL_GRADIENT = 0.1;
+const CANONICAL_96_MODERATE_SIGNAL_MAX_CURRENT_SPATIAL = 0.26;
+const CANONICAL_96_MODERATE_SIGNAL_MAX_CURRENT_GRADIENT = 0.04;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MIN_ORIGINAL_SPATIAL = 0.6;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MIN_ORIGINAL_GRADIENT = 0.45;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MAX_NEGATIVE_RESIDUAL = -0.12;
@@ -197,6 +205,97 @@ const SMALL_ANCHOR_RELOCATION_MAX_ACCEPTED_SPATIAL = 0.14;
 const SMALL_ANCHOR_RELOCATION_MAX_ACCEPTED_GRADIENT = 0.24;
 const SMALL_ANCHOR_RELOCATION_MIN_ORIGINAL_SPATIAL = 0.32;
 const SMALL_ANCHOR_RELOCATION_MIN_SUPPRESSION_GAIN = 0.22;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_SPATIAL = 0.4;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_GRADIENT = 0.45;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_SPATIAL = 0.25;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_GRADIENT = 0.4;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_CURRENT_SPATIAL = -0.16;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_CURRENT_GRADIENT = 0.18;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_BALANCED_GAIN = 0.035;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_SPATIAL = 0.12;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_GRADIENT = 0.2;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_DARK_HALO = 4;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_VISUAL_ARTIFACT = 0.2;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_GAINS = Object.freeze([0.45, 0.55, 0.6, 0.7, 0.85]);
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_SHARPEN_AMOUNT = 0.25;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_SHARPEN_ALPHA_GAIN = 0.55;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MIN_ALPHA = 0.24;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_ALPHA = 0.78;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_SCALE = 0.9;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_ALPHA_GAIN = 0.65;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_SPATIAL = 0.14;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_CURRENT_SPATIAL = -0.2;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_CURRENT_GRADIENT = -0.05;
+const KNOWN_48_POWER_PROFILE_RESCUE_EXPONENT = 1.08;
+const KNOWN_48_POWER_PROFILE_RESCUE_ALPHA_GAIN = 0.6;
+const KNOWN_48_POWER_PROFILE_RESCUE_MIN_ORIGINAL_SPATIAL = 0.9;
+const KNOWN_48_POWER_PROFILE_RESCUE_MIN_ORIGINAL_GRADIENT = 0.8;
+const KNOWN_48_POWER_PROFILE_RESCUE_MIN_CURRENT_SPATIAL = 0.3;
+const KNOWN_48_POWER_PROFILE_RESCUE_MAX_CURRENT_GRADIENT = 0.14;
+const KNOWN_48_POWER_PROFILE_RESCUE_MAX_SPATIAL = 0.14;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_ORIGINAL_SPATIAL = 0.75;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_ORIGINAL_GRADIENT = 0.55;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_CURRENT_SPATIAL = 0.14;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_CURRENT_SPATIAL = 0.24;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_CURRENT_GRADIENT = 0.04;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_CURRENT_GRADIENT = 0.14;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_NEAR_BLACK_RATIO = 0.35;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_BALANCED_GAIN = 0.03;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_ARTIFACT_DELTA = 0.02;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_ARTIFACT = 0.16;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_SPATIAL = 0.13;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_GRADIENT = 0.13;
+const KNOWN_48_BOUNDARY_REPAIR_RESCUE_PRESET = Object.freeze({
+    radius: 18,
+    minAlpha: 0.04,
+    maxAlpha: 0.75,
+    strength: 0.68,
+    gamma: 0.62
+});
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SIZE = 46;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MARGIN = 97;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MIN_ALPHA = 0.12;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_ALPHA = 0.42;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SCALE = 1.24;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_ALPHA_GAIN = 0.45;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MIN_ORIGINAL_SPATIAL = 0.12;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MIN_ORIGINAL_GRADIENT = 0.4;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_SPATIAL = 0.14;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_VISUAL_ARTIFACT = 0.22;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_CURRENT_SPATIAL = -0.18;
+const KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_CURRENT_GRADIENT = 0.05;
+const QUANTIZED_BODY_CORRECTION_SIZE = 48;
+const QUANTIZED_BODY_CORRECTION_MARGIN = 96;
+const QUANTIZED_BODY_CORRECTION_MAX_CURRENT_SPATIAL = -0.16;
+const QUANTIZED_BODY_CORRECTION_MAX_CURRENT_GRADIENT = 0.08;
+const QUANTIZED_BODY_CORRECTION_LOW_ALPHA_MAX = 0.04;
+const QUANTIZED_BODY_CORRECTION_LOW_ABS_MAX = 4;
+const QUANTIZED_BODY_CORRECTION_BODY_MIN_ALPHA = 0.12;
+const QUANTIZED_BODY_CORRECTION_BODY_MEAN_MAX = -0.5;
+const QUANTIZED_BODY_CORRECTION_BODY_NEGATIVE_RATIO_MIN = 0.2;
+const QUANTIZED_BODY_CORRECTION_RESIDUAL_THRESHOLD = -0.5;
+const QUANTIZED_BODY_CORRECTION_PRIOR_RADIUS = 6;
+const QUANTIZED_BODY_CORRECTION_MIN_BALANCED_GAIN = 0.03;
+const QUANTIZED_BODY_CORRECTION_MAX_ARTIFACT_INCREASE = 0.05;
+const DARK_HALO_RESCUE_MIN_DARK_HALO_LUM = 10;
+const DARK_HALO_RESCUE_MAX_CURRENT_SPATIAL = -0.16;
+const DARK_HALO_RESCUE_MAX_ABS_CURRENT_GRADIENT = 0.08;
+const DARK_HALO_RESCUE_MAX_DARK_HALO_LUM = 4;
+const DARK_HALO_RESCUE_MAX_VISUAL_ARTIFACT = 0.22;
+const DARK_HALO_RESCUE_MAX_NEWLY_CLIPPED_RATIO = 0.04;
+const DARK_HALO_RESCUE_MIN_BALANCED_GAIN = 0.04;
+const DARK_HALO_RESCUE_GAINS = Object.freeze([0.25, 0.35, 0.45]);
+const DARK_HALO_RESCUE_LOGO_VALUES = Object.freeze([224, 232, 240]);
+const DARK_HALO_RESCUE_CONFIGS = Object.freeze([
+    { logoSize: 48, marginRight: 96, marginBottom: 98 },
+    { logoSize: 48, marginRight: 96, marginBottom: 97 },
+    { logoSize: 48, marginRight: 96, marginBottom: 96 },
+    { logoSize: 46, marginRight: 97, marginBottom: 97 },
+    { logoSize: 46, marginRight: 97, marginBottom: 96 },
+    { logoSize: 46, marginRight: 96, marginBottom: 97 },
+    { logoSize: 47, marginRight: 96, marginBottom: 96 },
+    { logoSize: 47, marginRight: 97, marginBottom: 96 }
+]);
 
 function nowMs() {
     if (typeof globalThis.performance?.now === 'function') {
@@ -272,7 +371,8 @@ function createWatermarkMeta({
     skipReason = null,
     subpixelShift = null,
     selectionDebug = null,
-    alphaAdjustmentStages = null
+    alphaAdjustmentStages = null,
+    alphaMapSource = null
 } = {}) {
     const normalizedPosition = normalizeMetaPosition(position);
 
@@ -303,7 +403,8 @@ function createWatermarkMeta({
         decisionTier,
         subpixelShift: subpixelShift ?? null,
         selectionDebug,
-        alphaAdjustmentStages: Array.isArray(alphaAdjustmentStages) ? alphaAdjustmentStages : null
+        alphaAdjustmentStages: Array.isArray(alphaAdjustmentStages) ? alphaAdjustmentStages : null,
+        alphaMapSource: alphaMapSource ?? null
     };
 }
 
@@ -1967,8 +2068,11 @@ function refinePreviewResidualEdge({
 
 function scoreLocatedAggressiveCandidate({
     imageData,
+    originalImageData,
     alphaMap,
-    position
+    position,
+    alphaGain = 1,
+    baselineGradientScore = null
 }) {
     const spatialScore = computeRegionSpatialCorrelation({
         imageData,
@@ -1981,11 +2085,36 @@ function scoreLocatedAggressiveCandidate({
         region: { x: position.x, y: position.y, size: position.width }
     });
     const nearBlackRatio = calculateNearBlackRatio(imageData, position);
+    const baselineNearBlackRatio = originalImageData
+        ? calculateNearBlackRatio(originalImageData, position)
+        : nearBlackRatio;
+    const artifacts = originalImageData
+        ? assessRemovalDiffArtifacts({
+            originalImageData,
+            candidateImageData: imageData,
+            alphaMap,
+            position,
+            alphaGain
+        })
+        : null;
+    const balancedVisual = scoreBalancedVisualCandidate({
+        processedSpatial: spatialScore,
+        processedGradient: gradientScore,
+        nearBlackIncrease: nearBlackRatio - baselineNearBlackRatio,
+        newlyClippedRatio: artifacts?.newlyClippedRatio,
+        darkHaloLum: Math.max(0, -(artifacts?.halo?.deltaLum ?? 0)),
+        visualArtifactCost: artifacts?.visualArtifactCost,
+        gradientIncrease: Number.isFinite(baselineGradientScore)
+            ? gradientScore - baselineGradientScore
+            : 0
+    });
     return {
         spatialScore,
         gradientScore,
         nearBlackRatio,
-        cost: Math.abs(spatialScore) * 0.8 + Math.max(0, gradientScore) * 0.75
+        artifacts,
+        balancedVisual,
+        cost: balancedVisual.score
     };
 }
 
@@ -1996,11 +2125,13 @@ function pickLocatedAggressiveCandidate(currentBest, candidate) {
 }
 
 function buildLocatedAggressiveCandidate({
+    originalImageData,
     sourceImageData,
     alphaMap,
     position,
     alphaGain,
-    repeatCount
+    repeatCount,
+    baselineGradientScore
 }) {
     const candidate = cloneImageData(sourceImageData);
     for (let passIndex = 0; passIndex < repeatCount; passIndex++) {
@@ -2012,8 +2143,11 @@ function buildLocatedAggressiveCandidate({
         repeatCount,
         ...scoreLocatedAggressiveCandidate({
             imageData: candidate,
+            originalImageData,
             alphaMap,
-            position
+            position,
+            alphaGain,
+            baselineGradientScore
         })
     };
 }
@@ -2035,7 +2169,14 @@ function refineLocatedAggressiveRemoval({
         spatialScore: currentSpatialScore,
         gradientScore: currentGradientScore,
         nearBlackRatio: calculateNearBlackRatio(currentImageData, position),
-        cost: Math.abs(currentSpatialScore) * 0.8 + Math.max(0, currentGradientScore) * 0.75
+        ...scoreLocatedAggressiveCandidate({
+            imageData: currentImageData,
+            originalImageData,
+            alphaMap,
+            position,
+            alphaGain: currentAlphaGain,
+            baselineGradientScore: currentGradientScore
+        })
     };
     let best = current;
     const gains = new Set([
@@ -2048,11 +2189,13 @@ function refineLocatedAggressiveRemoval({
             best = pickLocatedAggressiveCandidate(
                 best,
                 buildLocatedAggressiveCandidate({
+                    originalImageData,
                     sourceImageData: originalImageData,
                     alphaMap,
                     position,
                     alphaGain,
-                    repeatCount
+                    repeatCount,
+                    baselineGradientScore: currentGradientScore
                 })
             );
         }
@@ -2085,14 +2228,18 @@ function refineLocatedAggressiveRemoval({
                 edgeCleanup: true,
                 ...scoreLocatedAggressiveCandidate({
                     imageData: edgeCandidate,
+                    originalImageData,
                     alphaMap,
-                    position
+                    position,
+                    alphaGain: edgeSource.alphaGain,
+                    baselineGradientScore: currentGradientScore
                 })
             });
         }
     }
 
     if (best.imageData === currentImageData) return null;
+    if (best.cost > current.cost - LOCATED_AGGRESSIVE_MIN_BALANCED_GAIN) return null;
     return best;
 }
 
@@ -2137,10 +2284,21 @@ function shouldSkipLocatedAggressiveForCleanCanonical96({
         currentSpatial >= 0 &&
         currentSpatial <= 0.22 &&
         Math.max(0, currentGradient) <= 0.1;
+    const cleanModerateSignalStandardAlpha =
+        resolvedAlphaGain <= 1 &&
+        currentSpatial >= 0 &&
+        currentSpatial <= CANONICAL_96_MODERATE_SIGNAL_MAX_CURRENT_SPATIAL &&
+        Math.max(0, currentGradient) <= CANONICAL_96_MODERATE_SIGNAL_MAX_CURRENT_GRADIENT;
 
-    return originalSpatial >= 0.55 &&
+    return (
+        originalSpatial >= 0.55 &&
         originalGradient >= 0.2 &&
-        (cleanStandardAlpha || cleanBalancedAlpha);
+        (cleanStandardAlpha || cleanBalancedAlpha)
+    ) || (
+        originalSpatial >= CANONICAL_96_MODERATE_SIGNAL_MIN_ORIGINAL_SPATIAL &&
+        originalGradient >= CANONICAL_96_MODERATE_SIGNAL_MIN_ORIGINAL_GRADIENT &&
+        cleanModerateSignalStandardAlpha
+    );
 }
 
 function shouldRelocateSmallFixedLocalAnchor({
@@ -2335,6 +2493,1062 @@ function refineSmallFixedLocalAnchorGeometry({
     return best;
 }
 
+function isKnown48LargeMarginConfig(config) {
+    if (!config || config.logoSize !== 48) return false;
+    return Math.abs(Number(config.marginRight) - 96) <= 2 &&
+        Math.abs(Number(config.marginBottom) - 96) <= 2;
+}
+
+function sharpenKnown48AlphaMap(alphaMap, size, amount) {
+    const sharpened = new Float32Array(alphaMap.length);
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            let sum = 0;
+            let count = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                const sourceY = y + dy;
+                if (sourceY < 0 || sourceY >= size) continue;
+                for (let dx = -1; dx <= 1; dx++) {
+                    const sourceX = x + dx;
+                    if (sourceX < 0 || sourceX >= size) continue;
+                    sum += alphaMap[sourceY * size + sourceX];
+                    count++;
+                }
+            }
+            const index = y * size + x;
+            const blurred = count > 0 ? sum / count : alphaMap[index];
+            sharpened[index] = Math.max(0, Math.min(0.99, alphaMap[index] + (alphaMap[index] - blurred) * amount));
+        }
+    }
+    return sharpened;
+}
+
+function scaleKnown48AlphaBand(alphaMap, { minAlpha, maxAlpha, scale }) {
+    const scaled = new Float32Array(alphaMap.length);
+    for (let index = 0; index < alphaMap.length; index++) {
+        const alpha = alphaMap[index];
+        scaled[index] = alpha >= minAlpha && alpha <= maxAlpha
+            ? Math.max(0, Math.min(0.99, alpha * scale))
+            : alpha;
+    }
+    return scaled;
+}
+
+function powerKnown48AlphaMap(alphaMap, exponent) {
+    const transformed = new Float32Array(alphaMap.length);
+    for (let index = 0; index < alphaMap.length; index++) {
+        transformed[index] = Math.max(0, Math.min(0.99, Math.pow(alphaMap[index], exponent)));
+    }
+    return transformed;
+}
+
+function scoreKnown48AntiTemplateRescueCandidate({
+    originalImageData,
+    alphaMap,
+    position,
+    alphaGain,
+    baselineGradientScore,
+    logoValue = undefined,
+    maxSpatial = KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_SPATIAL,
+    maxVisualArtifact = KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_VISUAL_ARTIFACT
+}) {
+    const imageData = cloneImageData(originalImageData);
+    removeWatermark(imageData, alphaMap, position, { alphaGain, logoValue });
+    const spatialScore = computeRegionSpatialCorrelation({
+        imageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size: position.width }
+    });
+    const gradientScore = computeRegionGradientCorrelation({
+        imageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size: position.width }
+    });
+    if (
+        Math.abs(spatialScore) > maxSpatial ||
+        Math.max(0, gradientScore) > KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_GRADIENT
+    ) {
+        return null;
+    }
+
+    const residualVisibility = assessWatermarkResidualVisibility({
+        imageData,
+        position,
+        alphaMap
+    });
+    if (residualVisibility?.visible !== false) return null;
+
+    const nearBlackRatio = calculateNearBlackRatio(imageData, position);
+    const baselineNearBlackRatio = calculateNearBlackRatio(originalImageData, position);
+    const artifacts = assessRemovalDiffArtifacts({
+        originalImageData,
+        candidateImageData: imageData,
+        alphaMap,
+        position,
+        alphaGain
+    });
+    const darkHaloLum = Math.max(0, -(artifacts?.halo?.deltaLum ?? 0));
+    const visualArtifactCost = artifacts?.visualArtifactCost ?? 0;
+    if (
+        darkHaloLum > KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_DARK_HALO ||
+        visualArtifactCost > maxVisualArtifact
+    ) {
+        return null;
+    }
+    const balancedVisual = scoreBalancedVisualCandidate({
+        processedSpatial: spatialScore,
+        processedGradient: gradientScore,
+        nearBlackIncrease: nearBlackRatio - baselineNearBlackRatio,
+        newlyClippedRatio: artifacts?.newlyClippedRatio,
+        darkHaloLum,
+        visualArtifactCost,
+        gradientIncrease: Number.isFinite(baselineGradientScore)
+            ? gradientScore - baselineGradientScore
+            : 0
+    });
+
+    return {
+        imageData,
+        alphaMap,
+        position,
+        config: {
+            logoSize: position.width,
+            marginRight: originalImageData.width - position.x - position.width,
+            marginBottom: originalImageData.height - position.y - position.height
+        },
+        alphaGain,
+        logoValue,
+        spatialScore,
+        gradientScore,
+        residualVisibility,
+        nearBlackRatio,
+        artifacts,
+        balancedVisual,
+        cost: balancedVisual.score
+    };
+}
+
+function refineKnown48AntiTemplateResidual({
+    originalImageData,
+    currentImageData,
+    currentAlphaMap,
+    currentPosition,
+    currentConfig,
+    currentSpatialScore,
+    currentGradientScore,
+    currentAlphaGain,
+    originalSpatialScore,
+    originalGradientScore
+}) {
+    const hasStrongOriginalEvidence =
+        originalSpatialScore >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_SPATIAL &&
+        originalGradientScore >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_GRADIENT;
+    const hasWeakOriginalEvidence =
+        originalSpatialScore >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_SPATIAL &&
+        originalGradientScore >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_GRADIENT;
+    const hasMidBoostEntryEvidence =
+        originalSpatialScore < KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_SPATIAL &&
+        currentSpatialScore <= KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_CURRENT_SPATIAL &&
+        currentGradientScore <= KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_CURRENT_GRADIENT;
+
+    if (
+        !isKnown48LargeMarginConfig(currentConfig) ||
+        !currentPosition ||
+        currentPosition.width !== currentPosition.height ||
+        (!hasStrongOriginalEvidence && !hasWeakOriginalEvidence && !hasMidBoostEntryEvidence) ||
+        currentSpatialScore > KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_CURRENT_SPATIAL ||
+        Math.max(0, currentGradientScore) > KNOWN_48_ANTI_TEMPLATE_RESCUE_MAX_CURRENT_GRADIENT
+    ) {
+        return null;
+    }
+
+    const currentVisibility = assessWatermarkResidualVisibility({
+        imageData: currentImageData,
+        position: currentPosition,
+        alphaMap: currentAlphaMap
+    });
+    if (currentVisibility?.visible !== true || currentVisibility.visiblePositiveHalo === true) return null;
+
+    const currentScore = scoreKnown48AntiTemplateRescueCandidate({
+        originalImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain,
+        baselineGradientScore: currentGradientScore
+    });
+    const currentCost = currentScore?.cost ?? scoreLocatedAggressiveCandidate({
+        imageData: currentImageData,
+        originalImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain,
+        baselineGradientScore: currentGradientScore
+    }).cost;
+    let best = null;
+    const minSize = Math.max(KNOWN_48_EDGE_CLEANUP_MIN_SIZE, currentConfig.logoSize - 2);
+    const maxSize = Math.min(KNOWN_48_EDGE_CLEANUP_MAX_SIZE, currentConfig.logoSize + 1);
+    const minMarginRight = Math.max(0, currentConfig.marginRight - 1);
+    const maxMarginRight = currentConfig.marginRight + 2;
+    const minMarginBottom = Math.max(0, currentConfig.marginBottom - 1);
+    const maxMarginBottom = currentConfig.marginBottom + 2;
+
+    for (let size = minSize; size <= maxSize; size++) {
+        const alphaMap = size === currentPosition.width
+            ? currentAlphaMap
+            : interpolateAlphaMap(currentAlphaMap, currentPosition.width, size);
+        if (!alphaMap) continue;
+
+        for (let marginRight = minMarginRight; marginRight <= maxMarginRight; marginRight++) {
+            for (let marginBottom = minMarginBottom; marginBottom <= maxMarginBottom; marginBottom++) {
+                const position = {
+                    x: originalImageData.width - marginRight - size,
+                    y: originalImageData.height - marginBottom - size,
+                    width: size,
+                    height: size
+                };
+                if (
+                    position.x < 0 ||
+                    position.y < 0 ||
+                    position.x + size > originalImageData.width ||
+                    position.y + size > originalImageData.height
+                ) {
+                    continue;
+                }
+                const originalSpatial = computeRegionSpatialCorrelation({
+                    imageData: originalImageData,
+                    alphaMap,
+                    region: { x: position.x, y: position.y, size }
+                });
+                const originalGradient = computeRegionGradientCorrelation({
+                    imageData: originalImageData,
+                    alphaMap,
+                    region: { x: position.x, y: position.y, size }
+                });
+                const hasCandidateStrongEvidence =
+                    originalSpatial >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_SPATIAL &&
+                    originalGradient >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_GRADIENT;
+                const hasCandidateWeakEvidence =
+                    originalSpatial >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_SPATIAL &&
+                    originalGradient >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_GRADIENT;
+                if (!hasCandidateStrongEvidence && !hasCandidateWeakEvidence) {
+                    continue;
+                }
+
+                for (const alphaGain of KNOWN_48_ANTI_TEMPLATE_RESCUE_GAINS) {
+                    const candidate = scoreKnown48AntiTemplateRescueCandidate({
+                        originalImageData,
+                        alphaMap,
+                        position,
+                        alphaGain,
+                        baselineGradientScore: currentGradientScore
+                    });
+                    if (!candidate) continue;
+                    if (!best || candidate.cost < best.cost) {
+                        best = {
+                            ...candidate,
+                            originalSpatialScore: originalSpatial,
+                            originalGradientScore: originalGradient,
+                            suppressionGain: originalSpatial - candidate.spatialScore
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    if (currentPosition.width === 48 && currentPosition.height === 48) {
+        const sharpenedAlphaMap = sharpenKnown48AlphaMap(
+            currentAlphaMap,
+            48,
+            KNOWN_48_ANTI_TEMPLATE_RESCUE_SHARPEN_AMOUNT
+        );
+        const sharpenedOriginalSpatial = computeRegionSpatialCorrelation({
+            imageData: originalImageData,
+            alphaMap: sharpenedAlphaMap,
+            region: { x: currentPosition.x, y: currentPosition.y, size: 48 }
+        });
+        const sharpenedOriginalGradient = computeRegionGradientCorrelation({
+            imageData: originalImageData,
+            alphaMap: sharpenedAlphaMap,
+            region: { x: currentPosition.x, y: currentPosition.y, size: 48 }
+        });
+        const hasSharpenedStrongEvidence =
+            sharpenedOriginalSpatial >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_SPATIAL &&
+            sharpenedOriginalGradient >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_GRADIENT;
+        const hasSharpenedWeakEvidence =
+            sharpenedOriginalSpatial >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_SPATIAL &&
+            sharpenedOriginalGradient >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_GRADIENT;
+        if (hasSharpenedStrongEvidence || hasSharpenedWeakEvidence) {
+            const sharpenedCandidate = scoreKnown48AntiTemplateRescueCandidate({
+                originalImageData,
+                alphaMap: sharpenedAlphaMap,
+                position: currentPosition,
+                alphaGain: KNOWN_48_ANTI_TEMPLATE_RESCUE_SHARPEN_ALPHA_GAIN,
+                baselineGradientScore: currentGradientScore
+            });
+            if (sharpenedCandidate && (!best || sharpenedCandidate.cost < best.cost)) {
+                best = {
+                    ...sharpenedCandidate,
+                    originalSpatialScore: sharpenedOriginalSpatial,
+                    originalGradientScore: sharpenedOriginalGradient,
+                    suppressionGain: sharpenedOriginalSpatial - sharpenedCandidate.spatialScore
+                };
+            }
+        }
+
+        if (
+            currentSpatialScore <= KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_CURRENT_SPATIAL &&
+            currentGradientScore <= KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_CURRENT_GRADIENT
+        ) {
+            const coreDampenedAlphaMap = scaleKnown48AlphaBand(currentAlphaMap, {
+                minAlpha: KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MIN_ALPHA,
+                maxAlpha: KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_ALPHA,
+                scale: KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_SCALE
+            });
+            const coreDampenedOriginalSpatial = computeRegionSpatialCorrelation({
+                imageData: originalImageData,
+                alphaMap: coreDampenedAlphaMap,
+                region: { x: currentPosition.x, y: currentPosition.y, size: 48 }
+            });
+            const coreDampenedOriginalGradient = computeRegionGradientCorrelation({
+                imageData: originalImageData,
+                alphaMap: coreDampenedAlphaMap,
+                region: { x: currentPosition.x, y: currentPosition.y, size: 48 }
+            });
+            const hasCoreDampenedStrongEvidence =
+                coreDampenedOriginalSpatial >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_SPATIAL &&
+                coreDampenedOriginalGradient >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_ORIGINAL_GRADIENT;
+            const hasCoreDampenedWeakEvidence =
+                coreDampenedOriginalSpatial >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_SPATIAL &&
+                coreDampenedOriginalGradient >= KNOWN_48_ANTI_TEMPLATE_RESCUE_WEAK_MIN_ORIGINAL_GRADIENT;
+            if (hasCoreDampenedStrongEvidence || hasCoreDampenedWeakEvidence) {
+                const coreDampenedCandidate = scoreKnown48AntiTemplateRescueCandidate({
+                    originalImageData,
+                    alphaMap: coreDampenedAlphaMap,
+                    position: currentPosition,
+                    alphaGain: KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_ALPHA_GAIN,
+                    baselineGradientScore: currentGradientScore,
+                    maxSpatial: KNOWN_48_ANTI_TEMPLATE_RESCUE_CORE_DAMPEN_MAX_SPATIAL
+                });
+                if (coreDampenedCandidate && (!best || coreDampenedCandidate.cost < best.cost)) {
+                    best = {
+                        ...coreDampenedCandidate,
+                        originalSpatialScore: coreDampenedOriginalSpatial,
+                        originalGradientScore: coreDampenedOriginalGradient,
+                        suppressionGain: coreDampenedOriginalSpatial - coreDampenedCandidate.spatialScore
+                    };
+                }
+            }
+        }
+
+        if (
+            hasMidBoostEntryEvidence &&
+            currentSpatialScore <= KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_CURRENT_SPATIAL &&
+            currentGradientScore <= KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_CURRENT_GRADIENT
+        ) {
+            const midBoostBaseAlphaMap = interpolateAlphaMap(
+                currentAlphaMap,
+                currentPosition.width,
+                KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SIZE
+            );
+            if (midBoostBaseAlphaMap) {
+                const midBoostAlphaMap = scaleKnown48AlphaBand(midBoostBaseAlphaMap, {
+                    minAlpha: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MIN_ALPHA,
+                    maxAlpha: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_ALPHA,
+                    scale: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SCALE
+                });
+                const midBoostPosition = {
+                    x: originalImageData.width -
+                        KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MARGIN -
+                        KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SIZE,
+                    y: originalImageData.height -
+                        KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MARGIN -
+                        KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SIZE,
+                    width: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SIZE,
+                    height: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_SIZE
+                };
+                if (
+                    midBoostPosition.x >= 0 &&
+                    midBoostPosition.y >= 0 &&
+                    midBoostPosition.x + midBoostPosition.width <= originalImageData.width &&
+                    midBoostPosition.y + midBoostPosition.height <= originalImageData.height
+                ) {
+                    const midBoostOriginalSpatial = computeRegionSpatialCorrelation({
+                        imageData: originalImageData,
+                        alphaMap: midBoostAlphaMap,
+                        region: {
+                            x: midBoostPosition.x,
+                            y: midBoostPosition.y,
+                            size: midBoostPosition.width
+                        }
+                    });
+                    const midBoostOriginalGradient = computeRegionGradientCorrelation({
+                        imageData: originalImageData,
+                        alphaMap: midBoostAlphaMap,
+                        region: {
+                            x: midBoostPosition.x,
+                            y: midBoostPosition.y,
+                            size: midBoostPosition.width
+                        }
+                    });
+                    if (
+                        midBoostOriginalSpatial >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MIN_ORIGINAL_SPATIAL &&
+                        midBoostOriginalGradient >= KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MIN_ORIGINAL_GRADIENT
+                    ) {
+                        const midBoostCandidate = scoreKnown48AntiTemplateRescueCandidate({
+                            originalImageData,
+                            alphaMap: midBoostAlphaMap,
+                            position: midBoostPosition,
+                            alphaGain: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_ALPHA_GAIN,
+                            baselineGradientScore: currentGradientScore,
+                            maxSpatial: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_SPATIAL,
+                            maxVisualArtifact: KNOWN_48_ANTI_TEMPLATE_RESCUE_MID_BOOST_MAX_VISUAL_ARTIFACT
+                        });
+                        if (midBoostCandidate && (!best || midBoostCandidate.cost < best.cost)) {
+                            best = {
+                                ...midBoostCandidate,
+                                originalSpatialScore: midBoostOriginalSpatial,
+                                originalGradientScore: midBoostOriginalGradient,
+                                suppressionGain: midBoostOriginalSpatial - midBoostCandidate.spatialScore
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!best) return null;
+    if (best.cost > currentCost - KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_BALANCED_GAIN) return null;
+    return best;
+}
+
+function refineKnown48PowerProfileResidual({
+    originalImageData,
+    currentImageData,
+    currentAlphaMap,
+    currentPosition,
+    currentConfig,
+    currentSpatialScore,
+    currentGradientScore,
+    currentAlphaGain,
+    originalSpatialScore,
+    originalGradientScore
+}) {
+    if (
+        !isKnown48LargeMarginConfig(currentConfig) ||
+        currentPosition?.width !== 48 ||
+        currentPosition?.height !== 48 ||
+        originalSpatialScore < KNOWN_48_POWER_PROFILE_RESCUE_MIN_ORIGINAL_SPATIAL ||
+        originalGradientScore < KNOWN_48_POWER_PROFILE_RESCUE_MIN_ORIGINAL_GRADIENT ||
+        currentSpatialScore < KNOWN_48_POWER_PROFILE_RESCUE_MIN_CURRENT_SPATIAL ||
+        currentGradientScore > KNOWN_48_POWER_PROFILE_RESCUE_MAX_CURRENT_GRADIENT
+    ) {
+        return null;
+    }
+
+    const currentVisibility = assessWatermarkResidualVisibility({
+        imageData: currentImageData,
+        position: currentPosition,
+        alphaMap: currentAlphaMap
+    });
+    if (
+        currentVisibility?.visible !== true ||
+        currentVisibility.visibleSpatialResidual !== true ||
+        currentVisibility.visiblePositiveHalo === true
+    ) {
+        return null;
+    }
+
+    const currentCost = scoreLocatedAggressiveCandidate({
+        imageData: currentImageData,
+        originalImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain,
+        baselineGradientScore: currentGradientScore
+    }).cost;
+    const powerAlphaMap = powerKnown48AlphaMap(
+        currentAlphaMap,
+        KNOWN_48_POWER_PROFILE_RESCUE_EXPONENT
+    );
+    const candidate = scoreKnown48AntiTemplateRescueCandidate({
+        originalImageData,
+        alphaMap: powerAlphaMap,
+        position: currentPosition,
+        alphaGain: KNOWN_48_POWER_PROFILE_RESCUE_ALPHA_GAIN,
+        baselineGradientScore: currentGradientScore,
+        maxSpatial: KNOWN_48_POWER_PROFILE_RESCUE_MAX_SPATIAL
+    });
+    if (!candidate || candidate.cost > currentCost - KNOWN_48_ANTI_TEMPLATE_RESCUE_MIN_BALANCED_GAIN) {
+        return null;
+    }
+
+    return {
+        ...candidate,
+        originalSpatialScore,
+        originalGradientScore,
+        suppressionGain: originalSpatialScore - candidate.spatialScore
+    };
+}
+
+function applyKnown48BoundaryRepair({
+    imageData,
+    priorImageData,
+    alphaMap,
+    position,
+    preset = KNOWN_48_BOUNDARY_REPAIR_RESCUE_PRESET
+}) {
+    const candidate = cloneImageData(imageData);
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const localIndex = row * position.width + col;
+            const alpha = Math.abs(alphaMap[localIndex] ?? 0);
+            if (alpha < preset.minAlpha || alpha > preset.maxAlpha) continue;
+
+            const blend = clamp01(Math.pow(alpha, preset.gamma) * preset.strength);
+            if (blend <= 0.005) continue;
+
+            const pixelIndex = ((position.y + row) * candidate.width + position.x + col) * 4;
+            for (let channel = 0; channel < 3; channel++) {
+                candidate.data[pixelIndex + channel] = clampChannel(
+                    imageData.data[pixelIndex + channel] * (1 - blend) +
+                    priorImageData.data[pixelIndex + channel] * blend
+                );
+            }
+        }
+    }
+    return candidate;
+}
+
+function scoreKnown48BoundaryRepairCandidate({
+    originalImageData,
+    imageData,
+    alphaMap,
+    position,
+    alphaGain,
+    baselineGradientScore
+}) {
+    const locatedScore = scoreLocatedAggressiveCandidate({
+        imageData,
+        originalImageData,
+        alphaMap,
+        position,
+        alphaGain,
+        baselineGradientScore
+    });
+    const residualVisibility = assessWatermarkResidualVisibility({
+        imageData,
+        position,
+        alphaMap
+    });
+    const calibratedVisibility = assessCalibratedWatermarkResidualVisibility({
+        imageData,
+        originalImageData,
+        position,
+        alphaMap,
+        alphaGain
+    });
+    return {
+        ...locatedScore,
+        residualVisibility,
+        calibratedVisibility,
+        visualArtifactCost: locatedScore.artifacts?.visualArtifactCost ?? 0
+    };
+}
+
+function refineKnown48BoundaryRepairResidual({
+    originalImageData,
+    currentImageData,
+    currentAlphaMap,
+    currentPosition,
+    currentConfig,
+    currentSpatialScore,
+    currentGradientScore,
+    currentAlphaGain,
+    originalSpatialScore,
+    originalGradientScore
+}) {
+    if (
+        !isKnown48LargeMarginConfig(currentConfig) ||
+        currentPosition?.width !== 48 ||
+        currentPosition?.height !== 48 ||
+        originalSpatialScore < KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_ORIGINAL_SPATIAL ||
+        originalGradientScore < KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_ORIGINAL_GRADIENT ||
+        currentSpatialScore < KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_CURRENT_SPATIAL ||
+        currentSpatialScore > KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_CURRENT_SPATIAL ||
+        currentGradientScore < KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_CURRENT_GRADIENT ||
+        currentGradientScore > KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_CURRENT_GRADIENT
+    ) {
+        return null;
+    }
+
+    const currentVisibility = assessWatermarkResidualVisibility({
+        imageData: currentImageData,
+        position: currentPosition,
+        alphaMap: currentAlphaMap
+    });
+    if (currentVisibility?.visible !== true) {
+        return null;
+    }
+
+    const currentNearBlackRatio = calculateNearBlackRatio(currentImageData, currentPosition);
+    if (currentNearBlackRatio < KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_NEAR_BLACK_RATIO) {
+        return null;
+    }
+
+    const beforeScore = scoreKnown48BoundaryRepairCandidate({
+        originalImageData,
+        imageData: currentImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain,
+        baselineGradientScore: currentGradientScore
+    });
+    const priorImageData = buildPreviewNeighborhoodPrior({
+        previewImageData: currentImageData,
+        position: currentPosition,
+        radius: KNOWN_48_BOUNDARY_REPAIR_RESCUE_PRESET.radius
+    });
+    const candidateImageData = applyKnown48BoundaryRepair({
+        imageData: currentImageData,
+        priorImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition
+    });
+    const afterScore = scoreKnown48BoundaryRepairCandidate({
+        originalImageData,
+        imageData: candidateImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain,
+        baselineGradientScore: currentGradientScore
+    });
+    const balancedGain = beforeScore.cost - afterScore.cost;
+    const artifactDelta = afterScore.visualArtifactCost - beforeScore.visualArtifactCost;
+    if (
+        afterScore.residualVisibility?.visible !== false ||
+        afterScore.calibratedVisibility?.calibratedVisible !== false ||
+        afterScore.spatialScore > KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_SPATIAL ||
+        afterScore.gradientScore > KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_GRADIENT ||
+        afterScore.visualArtifactCost > KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_ARTIFACT ||
+        balancedGain < KNOWN_48_BOUNDARY_REPAIR_RESCUE_MIN_BALANCED_GAIN ||
+        artifactDelta > KNOWN_48_BOUNDARY_REPAIR_RESCUE_MAX_ARTIFACT_DELTA
+    ) {
+        return null;
+    }
+
+    return {
+        imageData: candidateImageData,
+        position: currentPosition,
+        config: currentConfig,
+        alphaMap: currentAlphaMap,
+        alphaGain: currentAlphaGain,
+        spatialScore: afterScore.spatialScore,
+        gradientScore: afterScore.gradientScore,
+        originalSpatialScore,
+        originalGradientScore,
+        suppressionGain: currentSpatialScore - afterScore.spatialScore,
+        balancedGain,
+        artifactDelta,
+        cost: afterScore.cost
+    };
+}
+
+function measureQuantizedBodyResidualProfile({ imageData, priorImageData, alphaMap, position }) {
+    let lowCount = 0;
+    let lowAbsResidualSum = 0;
+    let bodyCount = 0;
+    let bodyResidualSum = 0;
+    let bodyNegativeCount = 0;
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const localIndex = row * position.width + col;
+            const alpha = alphaMap[localIndex] ?? 0;
+            const pixelIndex = ((position.y + row) * imageData.width + position.x + col) * 4;
+            const residual = (
+                (
+                    imageData.data[pixelIndex] +
+                    imageData.data[pixelIndex + 1] +
+                    imageData.data[pixelIndex + 2]
+                ) -
+                (
+                    priorImageData.data[pixelIndex] +
+                    priorImageData.data[pixelIndex + 1] +
+                    priorImageData.data[pixelIndex + 2]
+                )
+            ) / 3;
+
+            if (alpha < QUANTIZED_BODY_CORRECTION_LOW_ALPHA_MAX) {
+                lowCount++;
+                lowAbsResidualSum += Math.abs(residual);
+            }
+            if (alpha >= QUANTIZED_BODY_CORRECTION_BODY_MIN_ALPHA) {
+                bodyCount++;
+                bodyResidualSum += residual;
+                if (residual < -1) bodyNegativeCount++;
+            }
+        }
+    }
+
+    return {
+        lowMeanAbsResidual: lowCount > 0 ? lowAbsResidualSum / lowCount : Number.POSITIVE_INFINITY,
+        bodyMeanResidual: bodyCount > 0 ? bodyResidualSum / bodyCount : 0,
+        bodyNegativeRatio: bodyCount > 0 ? bodyNegativeCount / bodyCount : 0
+    };
+}
+
+function applyQuantizedBodyCorrection({ imageData, priorImageData, alphaMap, position }) {
+    const candidate = cloneImageData(imageData);
+    let changedPixels = 0;
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const localIndex = row * position.width + col;
+            const alpha = alphaMap[localIndex] ?? 0;
+            if (alpha < QUANTIZED_BODY_CORRECTION_BODY_MIN_ALPHA) continue;
+
+            const pixelIndex = ((position.y + row) * imageData.width + position.x + col) * 4;
+            const residual = (
+                (
+                    imageData.data[pixelIndex] +
+                    imageData.data[pixelIndex + 1] +
+                    imageData.data[pixelIndex + 2]
+                ) -
+                (
+                    priorImageData.data[pixelIndex] +
+                    priorImageData.data[pixelIndex + 1] +
+                    priorImageData.data[pixelIndex + 2]
+                )
+            ) / 3;
+            if (residual >= QUANTIZED_BODY_CORRECTION_RESIDUAL_THRESHOLD) continue;
+
+            for (let channel = 0; channel < 3; channel++) {
+                candidate.data[pixelIndex + channel] = clampChannel(imageData.data[pixelIndex + channel] + 1);
+            }
+            changedPixels++;
+        }
+    }
+
+    return {
+        imageData: candidate,
+        changedPixels
+    };
+}
+
+function scoreQuantizedBodyCorrectionImage({
+    originalImageData,
+    imageData,
+    alphaMap,
+    position,
+    alphaGain,
+    baselineGradientScore
+}) {
+    const spatialScore = computeRegionSpatialCorrelation({
+        imageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size: position.width }
+    });
+    const gradientScore = computeRegionGradientCorrelation({
+        imageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size: position.width }
+    });
+    const residualVisibility = assessWatermarkResidualVisibility({
+        imageData,
+        position,
+        alphaMap
+    });
+    const calibratedVisibility = assessCalibratedWatermarkResidualVisibility({
+        imageData,
+        originalImageData,
+        position,
+        alphaMap,
+        alphaGain
+    });
+    const nearBlackRatio = calculateNearBlackRatio(imageData, position);
+    const baselineNearBlackRatio = calculateNearBlackRatio(originalImageData, position);
+    const artifacts = assessRemovalDiffArtifacts({
+        originalImageData,
+        candidateImageData: imageData,
+        alphaMap,
+        position,
+        alphaGain
+    });
+    const darkHaloLum = Math.max(0, -(artifacts?.halo?.deltaLum ?? 0));
+    const visualArtifactCost = artifacts?.visualArtifactCost ?? 0;
+    const balancedVisual = scoreBalancedVisualCandidate({
+        processedSpatial: spatialScore,
+        processedGradient: gradientScore,
+        nearBlackIncrease: nearBlackRatio - baselineNearBlackRatio,
+        newlyClippedRatio: artifacts?.newlyClippedRatio,
+        darkHaloLum,
+        visualArtifactCost,
+        gradientIncrease: Number.isFinite(baselineGradientScore)
+            ? gradientScore - baselineGradientScore
+            : 0
+    });
+
+    return {
+        spatialScore,
+        gradientScore,
+        residualVisibility,
+        calibratedVisibility,
+        artifacts,
+        darkHaloLum,
+        visualArtifactCost,
+        balancedVisual
+    };
+}
+
+function refineQuantizedNegativeBodyResidual({
+    originalImageData,
+    currentImageData,
+    currentAlphaMap,
+    currentPosition,
+    currentConfig,
+    currentSpatialScore,
+    currentGradientScore,
+    currentAlphaGain
+}) {
+    if (
+        currentPosition?.width !== QUANTIZED_BODY_CORRECTION_SIZE ||
+        currentPosition?.height !== QUANTIZED_BODY_CORRECTION_SIZE ||
+        currentConfig?.logoSize !== QUANTIZED_BODY_CORRECTION_SIZE ||
+        currentConfig?.marginRight !== QUANTIZED_BODY_CORRECTION_MARGIN ||
+        currentConfig?.marginBottom !== QUANTIZED_BODY_CORRECTION_MARGIN ||
+        currentSpatialScore > QUANTIZED_BODY_CORRECTION_MAX_CURRENT_SPATIAL ||
+        currentGradientScore >= QUANTIZED_BODY_CORRECTION_MAX_CURRENT_GRADIENT
+    ) {
+        return null;
+    }
+
+    const currentVisibility = assessWatermarkResidualVisibility({
+        imageData: currentImageData,
+        position: currentPosition,
+        alphaMap: currentAlphaMap
+    });
+    if (currentVisibility?.visible !== true) return null;
+
+    const priorImageData = buildPreviewNeighborhoodPrior({
+        previewImageData: currentImageData,
+        position: currentPosition,
+        radius: QUANTIZED_BODY_CORRECTION_PRIOR_RADIUS
+    });
+    const profile = measureQuantizedBodyResidualProfile({
+        imageData: currentImageData,
+        priorImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition
+    });
+    if (
+        profile.lowMeanAbsResidual > QUANTIZED_BODY_CORRECTION_LOW_ABS_MAX ||
+        profile.bodyMeanResidual > QUANTIZED_BODY_CORRECTION_BODY_MEAN_MAX ||
+        profile.bodyNegativeRatio < QUANTIZED_BODY_CORRECTION_BODY_NEGATIVE_RATIO_MIN
+    ) {
+        return null;
+    }
+
+    const beforeScore = scoreQuantizedBodyCorrectionImage({
+        originalImageData,
+        imageData: currentImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain,
+        baselineGradientScore: currentGradientScore
+    });
+    const correction = applyQuantizedBodyCorrection({
+        imageData: currentImageData,
+        priorImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition
+    });
+    if (correction.changedPixels <= 0) return null;
+
+    const afterScore = scoreQuantizedBodyCorrectionImage({
+        originalImageData,
+        imageData: correction.imageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain,
+        baselineGradientScore: currentGradientScore
+    });
+    const balancedGain = beforeScore.balancedVisual.score - afterScore.balancedVisual.score;
+    const artifactDelta = afterScore.visualArtifactCost - beforeScore.visualArtifactCost;
+    const clearsVisible = afterScore.calibratedVisibility?.calibratedVisible === false &&
+        afterScore.residualVisibility?.visible === false;
+    if (
+        !clearsVisible ||
+        balancedGain < QUANTIZED_BODY_CORRECTION_MIN_BALANCED_GAIN ||
+        artifactDelta > QUANTIZED_BODY_CORRECTION_MAX_ARTIFACT_INCREASE
+    ) {
+        return null;
+    }
+
+    return {
+        imageData: correction.imageData,
+        changedPixels: correction.changedPixels,
+        profile,
+        spatialScore: afterScore.spatialScore,
+        gradientScore: afterScore.gradientScore,
+        suppressionGain: currentSpatialScore - afterScore.spatialScore,
+        balancedGain,
+        artifactDelta,
+        cost: afterScore.balancedVisual.score,
+        alphaGain: currentAlphaGain
+    };
+}
+
+function resolveRescueAlphaMaps({ size, currentAlphaMap, currentSize, alpha96, getAlphaMap }) {
+    const alphaMaps = [];
+    const addAlphaMap = (alphaMap, source) => {
+        if (!alphaMap || alphaMaps.some((entry) => entry.alphaMap === alphaMap)) return;
+        alphaMaps.push({ alphaMap, source });
+    };
+    if (typeof getAlphaMap === 'function') {
+        addAlphaMap(getAlphaMap(size), 'provided');
+    }
+    if (size === currentSize) {
+        addAlphaMap(currentAlphaMap, 'current');
+    } else {
+        addAlphaMap(interpolateAlphaMap(currentAlphaMap, currentSize, size), 'current-interpolated');
+    }
+    if (alpha96 && size !== 96) {
+        addAlphaMap(interpolateAlphaMap(alpha96, 96, size), 'alpha96-interpolated');
+    }
+    return alphaMaps;
+}
+
+function refineDarkHaloResidual({
+    originalImageData,
+    currentImageData,
+    currentAlphaMap,
+    currentPosition,
+    currentConfig,
+    currentSpatialScore,
+    currentGradientScore,
+    currentAlphaGain,
+    alpha96,
+    getAlphaMap
+}) {
+    if (
+        !isKnown48LargeMarginConfig(currentConfig) ||
+        !currentPosition ||
+        currentPosition.width !== currentPosition.height ||
+        currentSpatialScore > DARK_HALO_RESCUE_MAX_CURRENT_SPATIAL ||
+        Math.abs(currentGradientScore) > DARK_HALO_RESCUE_MAX_ABS_CURRENT_GRADIENT
+    ) {
+        return null;
+    }
+
+    const currentVisibility = assessWatermarkResidualVisibility({
+        imageData: currentImageData,
+        position: currentPosition,
+        alphaMap: currentAlphaMap
+    });
+    if (currentVisibility?.visible !== true || currentVisibility.visiblePositiveHalo === true) {
+        return null;
+    }
+
+    const currentArtifacts = assessRemovalDiffArtifacts({
+        originalImageData,
+        candidateImageData: currentImageData,
+        alphaMap: currentAlphaMap,
+        position: currentPosition,
+        alphaGain: currentAlphaGain
+    });
+    const currentDarkHaloLum = Math.max(0, -(currentArtifacts?.halo?.deltaLum ?? 0));
+    if (currentDarkHaloLum < DARK_HALO_RESCUE_MIN_DARK_HALO_LUM) return null;
+
+    const currentScore = scoreBalancedVisualCandidate({
+        processedSpatial: currentSpatialScore,
+        processedGradient: currentGradientScore,
+        newlyClippedRatio: currentArtifacts?.newlyClippedRatio,
+        darkHaloLum: currentDarkHaloLum,
+        visualArtifactCost: currentArtifacts?.visualArtifactCost
+    }).score;
+
+    let best = null;
+    for (const config of DARK_HALO_RESCUE_CONFIGS) {
+        const size = config.logoSize;
+        const alphaMaps = resolveRescueAlphaMaps({
+            size,
+            currentAlphaMap,
+            currentSize: currentPosition.width,
+            alpha96,
+            getAlphaMap
+        });
+        if (alphaMaps.length === 0) continue;
+
+        const position = {
+            x: originalImageData.width - config.marginRight - size,
+            y: originalImageData.height - config.marginBottom - size,
+            width: size,
+            height: size
+        };
+        if (
+            position.x < 0 ||
+            position.y < 0 ||
+            position.x + position.width > originalImageData.width ||
+            position.y + position.height > originalImageData.height
+        ) {
+            continue;
+        }
+
+        for (const alphaEntry of alphaMaps) {
+            const { alphaMap } = alphaEntry;
+            const originalSpatial = computeRegionSpatialCorrelation({
+                imageData: originalImageData,
+                alphaMap,
+                region: { x: position.x, y: position.y, size }
+            });
+            const originalGradient = computeRegionGradientCorrelation({
+                imageData: originalImageData,
+                alphaMap,
+                region: { x: position.x, y: position.y, size }
+            });
+
+            for (const alphaGain of DARK_HALO_RESCUE_GAINS) {
+                for (const logoValue of DARK_HALO_RESCUE_LOGO_VALUES) {
+                    const candidate = scoreKnown48AntiTemplateRescueCandidate({
+                        originalImageData,
+                        alphaMap,
+                        position,
+                        alphaGain,
+                        logoValue,
+                        baselineGradientScore: currentGradientScore,
+                        maxSpatial: 0.18,
+                        maxVisualArtifact: DARK_HALO_RESCUE_MAX_VISUAL_ARTIFACT
+                    });
+                    if (!candidate) continue;
+                    const darkHaloLum = Math.max(0, -(candidate.artifacts?.halo?.deltaLum ?? 0));
+                    const newlyClippedRatio = candidate.artifacts?.newlyClippedRatio ?? 0;
+                    if (
+                        darkHaloLum > DARK_HALO_RESCUE_MAX_DARK_HALO_LUM ||
+                        newlyClippedRatio > DARK_HALO_RESCUE_MAX_NEWLY_CLIPPED_RATIO
+                    ) {
+                        continue;
+                    }
+                    if (!best || candidate.cost < best.cost) {
+                        best = {
+                            ...candidate,
+                            alphaMapSource: alphaEntry.source,
+                            originalSpatialScore: originalSpatial,
+                            originalGradientScore: originalGradient,
+                            suppressionGain: originalSpatial - candidate.spatialScore
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    if (!best) return null;
+    if (best.cost > currentScore - DARK_HALO_RESCUE_MIN_BALANCED_GAIN) return null;
+    return best;
+}
+
 export function processWatermarkImageData(imageData, options = {}) {
     const totalStartedAt = nowMs();
     const debugTimingsEnabled = options.debugTimings === true;
@@ -2367,6 +3581,7 @@ export function processWatermarkImageData(imageData, options = {}) {
     let adaptiveConfidence = null;
     let alphaGain = 1;
     let subpixelShift = null;
+    let alphaMapSource = null;
     let templateWarp = null;
     let decisionTier = null;
     let passCount = 0;
@@ -3150,11 +4365,204 @@ export function processWatermarkImageData(imageData, options = {}) {
         suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
         source = `${source}+smooth-prior`;
     }
+
+    const known48AntiTemplateRescueStartedAt = nowMs();
+    const known48AntiTemplateRescue = refineKnown48AntiTemplateResidual({
+        originalImageData,
+        currentImageData: finalImageData,
+        currentAlphaMap: alphaMap,
+        currentPosition: position,
+        currentConfig: config,
+        currentSpatialScore: finalProcessedSpatialScore,
+        currentGradientScore: finalProcessedGradientScore,
+        currentAlphaGain: alphaGain,
+        originalSpatialScore,
+        originalGradientScore
+    });
+    if (known48AntiTemplateRescue) {
+        recordAlphaAdjustmentStage({
+            stage: 'known-48-anti-template-rescue',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: known48AntiTemplateRescue.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: known48AntiTemplateRescue.spatialScore,
+            afterGradientScore: known48AntiTemplateRescue.gradientScore,
+            suppressionGain: known48AntiTemplateRescue.suppressionGain,
+            cost: known48AntiTemplateRescue.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = known48AntiTemplateRescue.imageData;
+        alphaMap = known48AntiTemplateRescue.alphaMap;
+        position = known48AntiTemplateRescue.position;
+        config = known48AntiTemplateRescue.config;
+        alphaGain = known48AntiTemplateRescue.alphaGain;
+        originalSpatialScore = known48AntiTemplateRescue.originalSpatialScore;
+        originalGradientScore = known48AntiTemplateRescue.originalGradientScore;
+        finalProcessedSpatialScore = known48AntiTemplateRescue.spatialScore;
+        finalProcessedGradientScore = known48AntiTemplateRescue.gradientScore;
+        suppressionGain = known48AntiTemplateRescue.suppressionGain;
+        source = `${source}+anti-template-rescue`;
+    }
+
+    const powerProfileRescueStartedAt = nowMs();
+    const powerProfileRescue = refineKnown48PowerProfileResidual({
+        originalImageData,
+        currentImageData: finalImageData,
+        currentAlphaMap: alphaMap,
+        currentPosition: position,
+        currentConfig: config,
+        currentSpatialScore: finalProcessedSpatialScore,
+        currentGradientScore: finalProcessedGradientScore,
+        currentAlphaGain: alphaGain,
+        originalSpatialScore,
+        originalGradientScore
+    });
+    if (powerProfileRescue) {
+        recordAlphaAdjustmentStage({
+            stage: 'known-48-power-profile-rescue',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: powerProfileRescue.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: powerProfileRescue.spatialScore,
+            afterGradientScore: powerProfileRescue.gradientScore,
+            suppressionGain: powerProfileRescue.suppressionGain,
+            cost: powerProfileRescue.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = powerProfileRescue.imageData;
+        alphaMap = powerProfileRescue.alphaMap;
+        position = powerProfileRescue.position;
+        config = powerProfileRescue.config;
+        alphaGain = powerProfileRescue.alphaGain;
+        originalSpatialScore = powerProfileRescue.originalSpatialScore;
+        originalGradientScore = powerProfileRescue.originalGradientScore;
+        finalProcessedSpatialScore = powerProfileRescue.spatialScore;
+        finalProcessedGradientScore = powerProfileRescue.gradientScore;
+        suppressionGain = powerProfileRescue.suppressionGain;
+        source = `${source}+power-profile-rescue`;
+    }
+
+    const boundaryRepairRescueStartedAt = nowMs();
+    const boundaryRepairRescue = refineKnown48BoundaryRepairResidual({
+        originalImageData,
+        currentImageData: finalImageData,
+        currentAlphaMap: alphaMap,
+        currentPosition: position,
+        currentConfig: config,
+        currentSpatialScore: finalProcessedSpatialScore,
+        currentGradientScore: finalProcessedGradientScore,
+        currentAlphaGain: alphaGain,
+        originalSpatialScore,
+        originalGradientScore
+    });
+    if (boundaryRepairRescue) {
+        recordAlphaAdjustmentStage({
+            stage: 'known-48-boundary-repair-rescue',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: boundaryRepairRescue.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: boundaryRepairRescue.spatialScore,
+            afterGradientScore: boundaryRepairRescue.gradientScore,
+            suppressionGain: boundaryRepairRescue.suppressionGain,
+            cost: boundaryRepairRescue.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = boundaryRepairRescue.imageData;
+        alphaMap = boundaryRepairRescue.alphaMap;
+        position = boundaryRepairRescue.position;
+        config = boundaryRepairRescue.config;
+        alphaGain = boundaryRepairRescue.alphaGain;
+        originalSpatialScore = boundaryRepairRescue.originalSpatialScore;
+        originalGradientScore = boundaryRepairRescue.originalGradientScore;
+        finalProcessedSpatialScore = boundaryRepairRescue.spatialScore;
+        finalProcessedGradientScore = boundaryRepairRescue.gradientScore;
+        suppressionGain = boundaryRepairRescue.suppressionGain;
+        source = `${source}+boundary-repair-rescue`;
+    }
+
+    const darkHaloRescueStartedAt = nowMs();
+    const darkHaloRescue = refineDarkHaloResidual({
+        originalImageData,
+        currentImageData: finalImageData,
+        currentAlphaMap: alphaMap,
+        currentPosition: position,
+        currentConfig: config,
+        currentSpatialScore: finalProcessedSpatialScore,
+        currentGradientScore: finalProcessedGradientScore,
+        currentAlphaGain: alphaGain,
+        alpha96,
+        getAlphaMap: options.getAlphaMap
+    });
+    if (darkHaloRescue) {
+        recordAlphaAdjustmentStage({
+            stage: 'dark-halo-low-logo-rescue',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: darkHaloRescue.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: darkHaloRescue.spatialScore,
+            afterGradientScore: darkHaloRescue.gradientScore,
+            suppressionGain: darkHaloRescue.suppressionGain,
+            cost: darkHaloRescue.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = darkHaloRescue.imageData;
+        alphaMap = darkHaloRescue.alphaMap;
+        position = darkHaloRescue.position;
+        config = darkHaloRescue.config;
+        alphaGain = darkHaloRescue.alphaGain;
+        alphaMapSource = darkHaloRescue.alphaMapSource;
+        originalSpatialScore = darkHaloRescue.originalSpatialScore;
+        originalGradientScore = darkHaloRescue.originalGradientScore;
+        finalProcessedSpatialScore = darkHaloRescue.spatialScore;
+        finalProcessedGradientScore = darkHaloRescue.gradientScore;
+        suppressionGain = darkHaloRescue.suppressionGain;
+        source = `${source}+dark-halo-rescue`;
+    }
+
+    const quantizedBodyCorrectionStartedAt = nowMs();
+    const quantizedBodyCorrection = refineQuantizedNegativeBodyResidual({
+        originalImageData,
+        currentImageData: finalImageData,
+        currentAlphaMap: alphaMap,
+        currentPosition: position,
+        currentConfig: config,
+        currentSpatialScore: finalProcessedSpatialScore,
+        currentGradientScore: finalProcessedGradientScore,
+        currentAlphaGain: alphaGain
+    });
+    if (quantizedBodyCorrection) {
+        recordAlphaAdjustmentStage({
+            stage: 'quantized-body-correction',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: quantizedBodyCorrection.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: quantizedBodyCorrection.spatialScore,
+            afterGradientScore: quantizedBodyCorrection.gradientScore,
+            suppressionGain: quantizedBodyCorrection.suppressionGain,
+            cost: quantizedBodyCorrection.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = quantizedBodyCorrection.imageData;
+        finalProcessedSpatialScore = quantizedBodyCorrection.spatialScore;
+        finalProcessedGradientScore = quantizedBodyCorrection.gradientScore;
+        suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
+        source = `${source}+quantized-body-correction`;
+    }
     if (debugTimingsEnabled) {
         debugTimings.previewEdgeCleanupMs = previewEdgeCleanupElapsedMs;
         debugTimings.smallPreviewRefinementMs = nowMs() - smallPreviewRefinementStartedAt;
         debugTimings.locatedAggressiveRemovalMs = nowMs() - locatedAggressiveStartedAt;
         debugTimings.smoothPriorCleanupMs = nowMs() - smoothPriorStartedAt;
+        debugTimings.known48AntiTemplateRescueMs = powerProfileRescueStartedAt - known48AntiTemplateRescueStartedAt;
+        debugTimings.powerProfileRescueMs = boundaryRepairRescueStartedAt - powerProfileRescueStartedAt;
+        debugTimings.boundaryRepairRescueMs = darkHaloRescueStartedAt - boundaryRepairRescueStartedAt;
+        debugTimings.darkHaloRescueMs = quantizedBodyCorrectionStartedAt - darkHaloRescueStartedAt;
+        debugTimings.quantizedBodyCorrectionMs = nowMs() - quantizedBodyCorrectionStartedAt;
         debugTimings.totalMs = nowMs() - totalStartedAt;
     }
 
@@ -3187,6 +4595,7 @@ export function processWatermarkImageData(imageData, options = {}) {
             applied: true,
             subpixelShift,
             alphaAdjustmentStages,
+            alphaMapSource,
             selectionDebug: createSelectionDebugSummary({
                 selectedTrial,
                 selectionSource: initialSelection.source,

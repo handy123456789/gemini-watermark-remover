@@ -2,6 +2,13 @@ const DEFAULT_CLEARED_SPATIAL_RESIDUAL = 0.04;
 const DEFAULT_CLEARED_GRADIENT_RESIDUAL = 0.12;
 const DEFAULT_EARLY_ACCEPT_MAX_SOURCE_PRIORITY = 3;
 const DEFAULT_EARLY_ACCEPT_MIN_SUPPRESSION_GAIN = 0.25;
+const DEFAULT_BALANCED_GRADIENT_WEIGHT = 0.6;
+const DEFAULT_BALANCED_NEAR_BLACK_WEIGHT = 3;
+const DEFAULT_BALANCED_TEXTURE_WEIGHT = 0.7;
+const DEFAULT_BALANCED_CLIPPING_WEIGHT = 2;
+const DEFAULT_BALANCED_DARK_HALO_WEIGHT = 0.012;
+const DEFAULT_BALANCED_ARTIFACT_WEIGHT = 0.35;
+const DEFAULT_BALANCED_GRADIENT_REGRESSION_WEIGHT = 0.25;
 
 function toFiniteNumber(value) {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -90,6 +97,56 @@ export function scoreDamage({
         texturePenalty: texturePenalty ?? null,
         newlyClippedRatio: newlyClippedRatio ?? null,
         halo
+    };
+}
+
+export function scoreBalancedVisualCandidate({
+    processedSpatial,
+    processedGradient,
+    nearBlackIncrease = 0,
+    texturePenalty = 0,
+    newlyClippedRatio = 0,
+    darkHaloLum = 0,
+    visualArtifactCost = null,
+    gradientIncrease = 0,
+    gradientWeight = DEFAULT_BALANCED_GRADIENT_WEIGHT,
+    nearBlackWeight = DEFAULT_BALANCED_NEAR_BLACK_WEIGHT,
+    textureWeight = DEFAULT_BALANCED_TEXTURE_WEIGHT,
+    clippingWeight = DEFAULT_BALANCED_CLIPPING_WEIGHT,
+    darkHaloWeight = DEFAULT_BALANCED_DARK_HALO_WEIGHT,
+    artifactWeight = DEFAULT_BALANCED_ARTIFACT_WEIGHT,
+    gradientRegressionWeight = DEFAULT_BALANCED_GRADIENT_REGRESSION_WEIGHT
+} = {}) {
+    const spatial = toFiniteNumber(processedSpatial) ?? 0;
+    const gradient = toFiniteNumber(processedGradient) ?? 0;
+    const resolvedNearBlackIncrease = Math.max(0, toFiniteNumber(nearBlackIncrease) ?? 0);
+    const resolvedTexturePenalty = Math.max(0, toFiniteNumber(texturePenalty) ?? 0);
+    const resolvedNewlyClippedRatio = Math.max(0, toFiniteNumber(newlyClippedRatio) ?? 0);
+    const resolvedDarkHaloLum = Math.max(0, toFiniteNumber(darkHaloLum) ?? 0);
+    const resolvedVisualArtifactCost = Math.max(0, toFiniteNumber(visualArtifactCost) ?? 0);
+    const resolvedGradientIncrease = Math.max(0, toFiniteNumber(gradientIncrease) ?? 0);
+
+    const residualCost = Math.abs(spatial) + Math.max(0, gradient) * gradientWeight;
+    const damageCost =
+        resolvedNearBlackIncrease * nearBlackWeight +
+        resolvedTexturePenalty * textureWeight +
+        resolvedNewlyClippedRatio * clippingWeight +
+        resolvedDarkHaloLum * darkHaloWeight +
+        resolvedVisualArtifactCost * artifactWeight +
+        resolvedGradientIncrease * gradientRegressionWeight;
+
+    return {
+        score: residualCost + damageCost,
+        residualCost,
+        damageCost,
+        spatial,
+        gradient,
+        nearBlackIncrease: resolvedNearBlackIncrease,
+        texturePenalty: resolvedTexturePenalty,
+        newlyClippedRatio: resolvedNewlyClippedRatio,
+        darkHaloLum: resolvedDarkHaloLum,
+        visualArtifactCost: resolvedVisualArtifactCost,
+        gradientIncrease: resolvedGradientIncrease
     };
 }
 

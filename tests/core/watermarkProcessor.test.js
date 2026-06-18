@@ -7,6 +7,7 @@ import { calculateAlphaMap } from '../../src/core/alphaMap.js';
 import { getEmbeddedAlphaMap } from '../../src/core/embeddedAlphaMaps.js';
 import { processWatermarkImageData } from '../../src/core/watermarkProcessor.js';
 import { interpolateAlphaMap, warpAlphaMap, computeRegionSpatialCorrelation } from '../../src/core/adaptiveDetector.js';
+import { assessRemovalDiffArtifacts } from '../../src/core/restorationMetrics.js';
 import { decodeImageDataInNode } from '../../scripts/sample-benchmark.js';
 import {
     applySyntheticWatermark,
@@ -477,6 +478,329 @@ test('processWatermarkImageData should relocate visible 45px fixed-local residua
         assert.ok(
             result.meta.detection.processedGradientScore <= item.maxGradient,
             `expected bounded gradient residual, got ${result.meta.detection.processedGradientScore}`
+        );
+    }
+});
+
+test('processWatermarkImageData should rescue visible 48px large-margin anti-template residuals conservatively', async (t) => {
+    const cases = [
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark/2026-06-09/2064208168950435840-source.png'
+            ),
+            expectedConfig: { logoSize: 46, marginRight: 97, marginBottom: 97 },
+            expectedAlphaGain: 0.45,
+            maxSpatial: 0.04,
+            maxGradient: 0.2
+        },
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark',
+                '\u6837\u672c',
+                'Gemini_Generated_Image_k7kqnyk7kqnyk7kq.png'
+            ),
+            expectedConfig: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+            expectedAlphaGain: 0.6,
+            maxSpatial: 0.06,
+            maxGradient: 0.08
+        },
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark',
+                '\u6837\u672c2',
+                'Gemini_Generated_Image_qn1n0lqn1n0lqn1n.png'
+            ),
+            expectedConfig: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+            expectedAlphaGain: 0.45,
+            maxSpatial: 0.12,
+            maxGradient: 0.14
+        },
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark',
+                '\u6837\u672c',
+                'Gemini_Generated_Image_xxexx6xxexx6xxex.png'
+            ),
+            expectedConfig: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+            expectedAlphaGain: 0.55,
+            maxSpatial: 0.08,
+            maxGradient: 0.14
+        },
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark',
+                '\u6837\u672c',
+                'Gemini_Generated_Image_pe3we7pe3we7pe3w.png'
+            ),
+            expectedConfig: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+            expectedAlphaGain: 0.65,
+            maxSpatial: 0.14,
+            maxGradient: 0.05
+        },
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark',
+                '\u6837\u672c',
+                'Gemini_Generated_Image_nz9g4wnz9g4wnz9g.png'
+            ),
+            expectedConfig: { logoSize: 46, marginRight: 97, marginBottom: 97 },
+            expectedAlphaGain: 0.45,
+            maxSpatial: 0.14,
+            maxGradient: 0.19
+        }
+    ];
+
+    try {
+        for (const item of cases) await access(item.samplePath);
+    } catch {
+        t.skip('external 48px anti-template residual samples are not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+
+    for (const item of cases) {
+        const imageData = await decodeImageDataInNode(item.samplePath);
+        const result = processWatermarkImageData(imageData, {
+            alpha48,
+            alpha96,
+            adaptiveMode: 'never',
+            getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+        });
+
+        assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+        assert.deepEqual(result.meta.config, item.expectedConfig);
+        assert.equal(result.meta.alphaGain, item.expectedAlphaGain);
+        assert.ok(
+            String(result.meta.source).includes('+anti-template-rescue'),
+            `expected anti-template rescue, source=${result.meta.source}`
+        );
+        assert.equal(
+            result.meta.detection.residualVisibility?.visible,
+            false,
+            `expected no visible residual, visibility=${JSON.stringify(result.meta.detection.residualVisibility)}`
+        );
+        assert.ok(
+            Math.abs(result.meta.detection.processedSpatialScore) <= item.maxSpatial,
+            `processedSpatial=${result.meta.detection.processedSpatialScore}`
+        );
+        assert.ok(
+            result.meta.detection.processedGradientScore <= item.maxGradient,
+            `processedGradient=${result.meta.detection.processedGradientScore}`
+        );
+    }
+});
+
+test('processWatermarkImageData should rescue quantized negative body residuals without broad cleanup', async (t) => {
+    const samplePath = path.resolve(
+        'D:/Project/sample-files/gemini-watermark',
+        '\u6837\u672c',
+        'Gemini_Generated_Image_wn0cz5wn0cz5wn0c.png'
+    );
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external quantized negative residual sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 48, marginRight: 96, marginBottom: 96 });
+    assert.ok(
+        String(result.meta.source).includes('+quantized-body-correction'),
+        `expected quantized body correction, source=${result.meta.source}`
+    );
+    assert.equal(
+        result.meta.detection.residualVisibility?.visible,
+        false,
+        `expected no visible residual, visibility=${JSON.stringify(result.meta.detection.residualVisibility)}`
+    );
+    assert.ok(
+        Math.abs(result.meta.detection.processedSpatialScore) <= 0.11,
+        `processedSpatial=${result.meta.detection.processedSpatialScore}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.02,
+        `processedGradient=${result.meta.detection.processedGradientScore}`
+    );
+});
+
+test('processWatermarkImageData should rescue strong positive 48px residuals with a gated power profile', async (t) => {
+    const samplePath = path.resolve(
+        'D:/Project/sample-files/gemini-watermark',
+        '\u6837\u672c2',
+        'Gemini_Generated_Image_mt4wolmt4wolmt4w.png'
+    );
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external positive 48px profile residual sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 48, marginRight: 96, marginBottom: 96 });
+    assert.equal(result.meta.alphaGain, 0.6);
+    assert.ok(
+        String(result.meta.source).includes('+power-profile-rescue'),
+        `expected power profile rescue, source=${result.meta.source}`
+    );
+    assert.equal(
+        result.meta.detection.residualVisibility?.visible,
+        false,
+        `expected no visible residual, visibility=${JSON.stringify(result.meta.detection.residualVisibility)}`
+    );
+    assert.ok(
+        Math.abs(result.meta.detection.processedSpatialScore) <= 0.13,
+        `processedSpatial=${result.meta.detection.processedSpatialScore}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.16,
+        `processedGradient=${result.meta.detection.processedGradientScore}`
+    );
+});
+
+test('processWatermarkImageData should rescue low-texture 48px boundary residuals without broad cleanup', async (t) => {
+    const samplePath = path.resolve(
+        'D:/Project/sample-files/gemini-watermark',
+        '\u6837\u672c',
+        'Gemini_Generated_Image_hoac1lhoac1lhoac.png'
+    );
+    try {
+        await access(samplePath);
+    } catch {
+        t.skip('external low-texture 48px boundary residual sample is not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(samplePath);
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    const artifacts = assessRemovalDiffArtifacts({
+        originalImageData: imageData,
+        candidateImageData: result.imageData,
+        position: result.meta.position,
+        alphaMap: alpha48
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 48, marginRight: 96, marginBottom: 96 });
+    assert.ok(
+        String(result.meta.source).includes('+boundary-repair-rescue'),
+        `expected boundary repair rescue, source=${result.meta.source}`
+    );
+    assert.equal(
+        result.meta.detection.residualVisibility?.visible,
+        false,
+        `expected no visible residual, visibility=${JSON.stringify(result.meta.detection.residualVisibility)}`
+    );
+    assert.ok(
+        result.meta.detection.processedSpatialScore <= 0.13,
+        `processedSpatial=${result.meta.detection.processedSpatialScore}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= 0.13,
+        `processedGradient=${result.meta.detection.processedGradientScore}`
+    );
+    assert.ok(
+        artifacts.visualArtifactCost <= 0.16,
+        `visualArtifactCost=${artifacts.visualArtifactCost}`
+    );
+});
+
+test('processWatermarkImageData should rescue dark halo residuals with conservative low-logo inversion', async (t) => {
+    const cases = [
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark',
+                '\u6837\u672c',
+                'Gemini_Generated_Image_9eao4b9eao4b9eao.png'
+            ),
+            expectedConfig: { logoSize: 48, marginRight: 96, marginBottom: 98 },
+            maxSpatial: 0.08,
+            maxGradient: 0.2
+        },
+        {
+            samplePath: path.resolve(
+                'D:/Project/sample-files/gemini-watermark',
+                '\u6837\u672c2',
+                'Gemini_Generated_Image_25ukbi25ukbi25uk.png'
+            ),
+            expectedConfig: { logoSize: 46, marginRight: 97, marginBottom: 96 },
+            maxSpatial: 0.18,
+            maxGradient: 0.15
+        }
+    ];
+
+    try {
+        for (const item of cases) await access(item.samplePath);
+    } catch {
+        t.skip('external dark halo residual samples are not available');
+        return;
+    }
+
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+
+    for (const item of cases) {
+        const imageData = await decodeImageDataInNode(item.samplePath);
+        const result = processWatermarkImageData(imageData, {
+            alpha48,
+            alpha96,
+            adaptiveMode: 'never',
+            getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+        });
+
+        assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+        assert.deepEqual(result.meta.config, item.expectedConfig);
+        assert.equal(result.meta.alphaGain, 0.25);
+        assert.ok(
+            String(result.meta.source).includes('+dark-halo-rescue'),
+            `expected dark halo rescue, source=${result.meta.source}`
+        );
+        assert.equal(
+            result.meta.detection.residualVisibility?.visible,
+            false,
+            `expected no visible residual, visibility=${JSON.stringify(result.meta.detection.residualVisibility)}`
+        );
+        assert.ok(
+            Math.abs(result.meta.detection.processedSpatialScore) <= item.maxSpatial,
+            `processedSpatial=${result.meta.detection.processedSpatialScore}`
+        );
+        assert.ok(
+            result.meta.detection.processedGradientScore <= item.maxGradient,
+            `processedGradient=${result.meta.detection.processedGradientScore}`
         );
     }
 });

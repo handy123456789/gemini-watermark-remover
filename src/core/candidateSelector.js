@@ -22,6 +22,7 @@ import {
 import {
     buildRankingKey,
     compareRankingKey,
+    scoreBalancedVisualCandidate,
     scoreDamage,
     scoreOriginalEvidence,
     scoreResidual,
@@ -137,15 +138,16 @@ const PREVIEW_ANCHOR_MIN_SCORE = 0.2;
 const PREVIEW_ANCHOR_LOCAL_DELTAS = [-1, 0, 1];
 const PREVIEW_TEMPLATE_ALIGN_SHIFTS = [-1, -0.5, 0, 0.5, 1];
 const PREVIEW_TEMPLATE_ALIGN_SCALES = [0.985, 1, 1.015];
-const PREVIEW_ANCHOR_GAIN_SKIP_RESIDUAL_THRESHOLD = 0.22;
+const PREVIEW_ANCHOR_GAIN_SKIP_RESIDUAL_THRESHOLD = 0.24;
 const PREVIEW_ANCHOR_GAIN_SKIP_GRADIENT_THRESHOLD = 0.24;
 const CORE_ALPHA_PRIORITY_GAINS = Object.freeze([0.6, 1, 1.1, 1.15, 1.3, 0.45, 0.7, 0.85, 0.55]);
 const CURRENT_LARGE_MARGIN_ULTRA_WEAK_ALPHA_GAINS = Object.freeze([0.25, 0.3, 0.35, 0.4]);
 const STANDARD_ANCHOR_WEAK_ALPHA_RESCUE_GAINS = Object.freeze([0.55, 0.7, 0.85]);
 const STANDARD_ANCHOR_WEAK_RESCUE_MAX_SPATIAL = 0.35;
-const STANDARD_ANCHOR_WEAK_RESCUE_MAX_GRADIENT = 0.18;
+const STANDARD_ANCHOR_WEAK_RESCUE_MAX_GRADIENT = 0.24;
 const STANDARD_ANCHOR_WEAK_RESCUE_MIN_IMPROVEMENT = 0.08;
 const STANDARD_ANCHOR_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE = 0.02;
+const STANDARD_ANCHOR_WEAK_RESCUE_MIN_BALANCED_ADVANTAGE = 0.03;
 const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_SPATIAL = 0.22;
 const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_GRADIENT = 0.36;
 const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_ORIGINAL_SPATIAL = 0.17;
@@ -640,6 +642,20 @@ function pickBetterWeakAlphaRescueCandidate(seed, currentBest, candidate) {
     return pickBetterCandidate(currentBest, candidate, 0.002);
 }
 
+function shouldPreferWeakAlphaRescueOverAccepted(acceptedTrial, rescueTrial) {
+    if (!acceptedTrial?.accepted || !rescueTrial?.accepted) return false;
+    if (rescueTrial.alphaGain >= 1) return false;
+
+    const acceptedCost = Number(acceptedTrial.validationCost);
+    const rescueCost = Number(rescueTrial.validationCost);
+    if (!Number.isFinite(acceptedCost) || !Number.isFinite(rescueCost)) return false;
+
+    return rescueCost <= acceptedCost - STANDARD_ANCHOR_WEAK_RESCUE_MIN_BALANCED_ADVANTAGE &&
+        Math.abs(rescueTrial.processedSpatialScore) <= Math.abs(acceptedTrial.processedSpatialScore) &&
+        Math.max(0, rescueTrial.processedGradientScore) <= STANDARD_ANCHOR_WEAK_RESCUE_MAX_GRADIENT &&
+        rescueTrial.nearBlackIncrease <= STANDARD_ANCHOR_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE;
+}
+
 function evaluateStandardTrialForSeed({
     originalImageData,
     seed,
@@ -688,7 +704,14 @@ function evaluateStandardTrialForSeed({
 
     return isWeakAlphaPrioritySeed(seed)
         ? bestWeakAlphaPriorityTrial ?? bestWeakAlphaRescueTrial ?? bestAcceptedTrial ?? fallbackTrial
-        : bestWeakAlphaPriorityTrial ?? bestAcceptedTrial ?? bestWeakAlphaRescueTrial ?? fallbackTrial;
+        : bestWeakAlphaPriorityTrial ??
+            (
+                shouldPreferWeakAlphaRescueOverAccepted(bestAcceptedTrial, bestWeakAlphaRescueTrial)
+                    ? bestWeakAlphaRescueTrial
+                    : bestAcceptedTrial
+            ) ??
+            bestWeakAlphaRescueTrial ??
+            fallbackTrial;
 }
 
 export function evaluateRestorationCandidate({
@@ -838,6 +861,13 @@ export function evaluateRestorationCandidate({
         processedGradient: processedScores.gradientScore,
         suppressionGain: improvement
     });
+    const balancedVisual = scoreBalancedVisualCandidate({
+        processedSpatial: processedScores.spatialScore,
+        processedGradient: processedScores.gradientScore,
+        nearBlackIncrease,
+        texturePenalty,
+        gradientIncrease
+    });
     const hardRejectBypassed =
         conservativeCatalogHardRejectAllowed ||
         visibleCatalogHardRejectAllowed ||
@@ -893,11 +923,8 @@ export function evaluateRestorationCandidate({
         originalEvidence,
         residual,
         damage,
-        validationCost:
-            Math.abs(processedScores.spatialScore) +
-            Math.max(0, processedScores.gradientScore) * 0.6 +
-            Math.max(0, nearBlackIncrease) * 3 +
-            texturePenalty
+        balancedVisual,
+        validationCost: balancedVisual.score
     };
 }
 

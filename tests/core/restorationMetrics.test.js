@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+    assessCalibratedWatermarkResidualVisibility,
     assessRemovalDiffArtifacts,
     assessReferenceTextureAlignment,
     assessReferenceTextureAlignmentFromStats,
     assessWatermarkResidualVisibility,
     calculateNearBlackRatio,
+    classifyCalibratedResidualMetricRisk,
     cloneImageData
 } from '../../src/core/restorationMetrics.js';
 
@@ -218,4 +220,178 @@ test('assessWatermarkResidualVisibility should flag bright alpha-band halos even
     assert.equal(visibility.visible, true);
     assert.equal(visibility.visiblePositiveHalo, true);
     assert.ok(visibility.positiveHaloLum >= 6, `positiveHaloLum=${visibility.positiveHaloLum}`);
+});
+
+test('assessCalibratedWatermarkResidualVisibility should keep bright halos visible', () => {
+    const width = 12;
+    const height = 12;
+    const position = { x: 4, y: 4, width: 4, height: 4 };
+    const alphaMap = new Float32Array([
+        0, 0.2, 0.2, 0,
+        0.2, 0.3, 0.3, 0.2,
+        0.2, 0.3, 0.3, 0.2,
+        0, 0.2, 0.2, 0
+    ]);
+    const imageData = {
+        width,
+        height,
+        data: new Uint8ClampedArray(width * height * 4)
+    };
+
+    for (let index = 0; index < imageData.data.length; index += 4) {
+        imageData.data[index] = 80;
+        imageData.data[index + 1] = 80;
+        imageData.data[index + 2] = 80;
+        imageData.data[index + 3] = 255;
+    }
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const alpha = alphaMap[row * position.width + col];
+            if (alpha < 0.18) continue;
+            const pixelIndex = ((position.y + row) * width + position.x + col) * 4;
+            imageData.data[pixelIndex] = 92;
+            imageData.data[pixelIndex + 1] = 92;
+            imageData.data[pixelIndex + 2] = 92;
+        }
+    }
+
+    const visibility = assessCalibratedWatermarkResidualVisibility({
+        imageData,
+        position,
+        alphaMap
+    });
+
+    assert.equal(visibility.rawVisible, true);
+    assert.equal(visibility.visible, true);
+    assert.equal(visibility.metricRisk, null);
+});
+
+test('assessCalibratedWatermarkResidualVisibility should mark flat clipped anti-template as metric risk', () => {
+    const width = 12;
+    const height = 12;
+    const position = { x: 4, y: 4, width: 4, height: 4 };
+    const alphaMap = new Float32Array([
+        0.02, 0.16, 0.16, 0.02,
+        0.16, 0.34, 0.34, 0.16,
+        0.16, 0.34, 0.34, 0.16,
+        0.02, 0.16, 0.16, 0.02
+    ]);
+    const originalImageData = {
+        width,
+        height,
+        data: new Uint8ClampedArray(width * height * 4)
+    };
+    const imageData = cloneImageData(originalImageData);
+
+    for (let index = 0; index < imageData.data.length; index += 4) {
+        originalImageData.data[index] = 24;
+        originalImageData.data[index + 1] = 24;
+        originalImageData.data[index + 2] = 24;
+        originalImageData.data[index + 3] = 255;
+        imageData.data[index] = 0;
+        imageData.data[index + 1] = 0;
+        imageData.data[index + 2] = 0;
+        imageData.data[index + 3] = 255;
+    }
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const alpha = alphaMap[row * position.width + col];
+            const pixelIndex = ((position.y + row) * width + position.x + col) * 4;
+            const value = Math.round(5 * (1 - alpha / 0.34));
+            imageData.data[pixelIndex] = value;
+            imageData.data[pixelIndex + 1] = value;
+            imageData.data[pixelIndex + 2] = value;
+        }
+    }
+
+    const visibility = assessCalibratedWatermarkResidualVisibility({
+        imageData,
+        originalImageData,
+        position,
+        alphaMap
+    });
+
+    assert.equal(visibility.rawVisible, true);
+    assert.equal(visibility.visibleSpatialResidual, true);
+    assert.equal(visibility.visible, false);
+    assert.equal(visibility.calibratedVisible, false);
+    assert.equal(visibility.metricRisk, 'flat-clipped-low-texture-spatial-correlation');
+});
+
+test('classifyCalibratedResidualMetricRisk should mark low-gradient positive spatial background collision', () => {
+    const metricRisk = classifyCalibratedResidualMetricRisk({
+        visibility: {
+            visible: true,
+            visibleSpatialResidual: true,
+            visiblePositiveHalo: false,
+            visibleGradientResidual: false,
+            positiveHaloLum: 0
+        },
+        spatialScore: 0.176,
+        gradientScore: 0.006,
+        nearBlackRatio: 0,
+        newlyClippedRatio: 0.001,
+        visualArtifactCost: 0.051
+    });
+
+    assert.equal(metricRisk, 'positive-spatial-background-collision');
+});
+
+test('classifyCalibratedResidualMetricRisk should mark low-gradient positive halo background collision', () => {
+    const metricRisk = classifyCalibratedResidualMetricRisk({
+        visibility: {
+            visible: true,
+            visibleSpatialResidual: true,
+            visiblePositiveHalo: true,
+            visibleGradientResidual: false,
+            positiveHaloLum: 29.63
+        },
+        spatialScore: 0.3,
+        gradientScore: -0.018,
+        nearBlackRatio: 0,
+        newlyClippedRatio: 0,
+        visualArtifactCost: 0.075
+    });
+
+    assert.equal(metricRisk, 'positive-halo-background-collision');
+});
+
+test('classifyCalibratedResidualMetricRisk should mark weak halo-only background collision', () => {
+    const metricRisk = classifyCalibratedResidualMetricRisk({
+        visibility: {
+            visible: true,
+            visibleSpatialResidual: false,
+            visiblePositiveHalo: true,
+            visibleGradientResidual: false,
+            positiveHaloLum: 13.1
+        },
+        spatialScore: 0.04,
+        gradientScore: 0.073,
+        nearBlackRatio: 0,
+        newlyClippedRatio: 0,
+        visualArtifactCost: 0.083
+    });
+
+    assert.equal(metricRisk, 'weak-halo-background-collision');
+});
+
+test('classifyCalibratedResidualMetricRisk should mark structured edge background collision', () => {
+    const metricRisk = classifyCalibratedResidualMetricRisk({
+        visibility: {
+            visible: true,
+            visibleSpatialResidual: false,
+            visiblePositiveHalo: true,
+            visibleGradientResidual: false,
+            positiveHaloLum: 21.57
+        },
+        spatialScore: 0.152,
+        gradientScore: 0.21,
+        nearBlackRatio: 0,
+        newlyClippedRatio: 0,
+        visualArtifactCost: 0.248
+    });
+
+    assert.equal(metricRisk, 'structured-edge-background-collision');
 });

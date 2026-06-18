@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
     buildRankingKey,
     compareRankingKey,
+    scoreBalancedVisualCandidate,
     scoreDamage,
     scoreOriginalEvidence,
     scoreResidual,
@@ -42,6 +43,28 @@ test('scoreDamage should mark texture and clipping damage as unsafe', () => {
     assert.equal(damage.safe, false);
     assert.equal(damage.reason, 'texture,clipping');
     assert.ok(damage.penalty > 0.6, `penalty=${damage.penalty}`);
+});
+
+test('scoreBalancedVisualCandidate should trade residual improvement against visible damage', () => {
+    const cleanResidualWithDamage = scoreBalancedVisualCandidate({
+        processedSpatial: 0.02,
+        processedGradient: 0.02,
+        newlyClippedRatio: 0.04,
+        darkHaloLum: 8,
+        visualArtifactCost: 0.2
+    });
+    const slightlyHigherResidualClean = scoreBalancedVisualCandidate({
+        processedSpatial: 0.08,
+        processedGradient: 0.04,
+        newlyClippedRatio: 0,
+        darkHaloLum: 0,
+        visualArtifactCost: 0.02
+    });
+
+    assert.ok(
+        slightlyHigherResidualClean.score < cleanResidualWithDamage.score,
+        `expected balanced score to prefer the visually safer candidate, clean=${slightlyHigherResidualClean.score}, damaged=${cleanResidualWithDamage.score}`
+    );
 });
 
 test('buildRankingKey and compareRankingKey should rank source priority before residual score', () => {

@@ -112,6 +112,12 @@
       "allowWeakResidual": true,
       "tags": ["canonical-96", "conservative-residual-allowed"]
     },
+    "20260617.png": {
+      "shouldProcess": true,
+      "expectedAnchor": { "logoSize": 96, "marginRight": 64, "marginBottom": 64 },
+      "expectedAlphaGain": { "min": 1, "max": 1 },
+      "tags": ["canonical-96", "moderate-signal-standard-alpha"]
+    },
     "21-9.png": {
       "shouldProcess": true,
       "expectedAnchor": { "logoSize": 48, "marginRight": 96, "marginBottom": 96 },

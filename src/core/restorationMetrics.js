@@ -26,6 +26,24 @@ const RESIDUAL_VISIBILITY_OUTER_MARGIN = 4;
 const RESIDUAL_VISIBILITY_POSITIVE_HALO_LUM_THRESHOLD = 6;
 const RESIDUAL_VISIBILITY_GRADIENT_THRESHOLD = 0.22;
 const RESIDUAL_VISIBILITY_SPATIAL_THRESHOLD = 0.18;
+const FLAT_CLIPPED_METRIC_RISK_NEAR_BLACK_RATIO = 0.92;
+const FLAT_CLIPPED_METRIC_RISK_NEWLY_CLIPPED_RATIO = 0.18;
+const FLAT_CLIPPED_METRIC_RISK_MAX_POSITIVE_HALO_LUM = 2;
+const FLAT_CLIPPED_METRIC_RISK_MIN_NEGATIVE_SPATIAL = 0.18;
+const POSITIVE_SPATIAL_BACKGROUND_COLLISION_MIN_SPATIAL = 0.14;
+const POSITIVE_SPATIAL_BACKGROUND_COLLISION_MAX_GRADIENT = 0.12;
+const POSITIVE_SPATIAL_BACKGROUND_COLLISION_MAX_POSITIVE_HALO_LUM = 32;
+const POSITIVE_SPATIAL_BACKGROUND_COLLISION_MAX_ARTIFACT_COST = 0.12;
+const WEAK_HALO_BACKGROUND_COLLISION_MAX_ABS_SPATIAL = 0.14;
+const WEAK_HALO_BACKGROUND_COLLISION_MAX_GRADIENT = 0.12;
+const WEAK_HALO_BACKGROUND_COLLISION_MAX_POSITIVE_HALO_LUM = 16;
+const WEAK_HALO_BACKGROUND_COLLISION_MAX_ARTIFACT_COST = 0.12;
+const WEAK_HALO_BACKGROUND_COLLISION_MAX_NEAR_BLACK_RATIO = 0.25;
+const WEAK_HALO_BACKGROUND_COLLISION_MAX_NEWLY_CLIPPED_RATIO = 0.02;
+const STRUCTURED_EDGE_BACKGROUND_COLLISION_MIN_GRADIENT = 0.2;
+const STRUCTURED_EDGE_BACKGROUND_COLLISION_MIN_ARTIFACT_COST = 0.2;
+const STRUCTURED_EDGE_BACKGROUND_COLLISION_MAX_NEAR_BLACK_RATIO = 0.1;
+const STRUCTURED_EDGE_BACKGROUND_COLLISION_MAX_NEWLY_CLIPPED_RATIO = 0.01;
 
 function meanAndVariance(values) {
     let sum = 0;
@@ -357,6 +375,123 @@ export function assessWatermarkResidualVisibility({
         visibleSpatialResidual,
         halo
     };
+}
+
+export function assessCalibratedWatermarkResidualVisibility({
+    imageData,
+    originalImageData = null,
+    position,
+    alphaMap,
+    alphaGain = 1
+}) {
+    const visibility = assessWatermarkResidualVisibility({
+        imageData,
+        position,
+        alphaMap
+    });
+    if (!visibility) return null;
+
+    const scores = scoreRegion(imageData, alphaMap, position);
+    const nearBlackRatio = calculateNearBlackRatio(imageData, position);
+    const artifacts = originalImageData
+        ? assessRemovalDiffArtifacts({
+            originalImageData,
+            candidateImageData: imageData,
+            alphaMap,
+            position,
+            alphaGain
+        })
+        : null;
+    const newlyClippedRatio = artifacts?.newlyClippedRatio ?? 0;
+    const metricRisk = classifyCalibratedResidualMetricRisk({
+        visibility,
+        spatialScore: scores.spatialScore,
+        gradientScore: scores.gradientScore,
+        nearBlackRatio,
+        newlyClippedRatio,
+        visualArtifactCost: artifacts?.visualArtifactCost ?? null,
+        hasOriginalImageData: Boolean(originalImageData)
+    });
+
+    return {
+        ...visibility,
+        rawVisible: visibility.visible,
+        visible: visibility.visible && !metricRisk,
+        calibratedVisible: visibility.visible && !metricRisk,
+        metricRisk,
+        nearBlackRatio,
+        newlyClippedRatio,
+        rawSpatialScore: scores.spatialScore,
+        rawGradientScore: scores.gradientScore
+    };
+}
+
+export function classifyCalibratedResidualMetricRisk({
+    visibility,
+    spatialScore,
+    gradientScore,
+    nearBlackRatio = 0,
+    newlyClippedRatio = 0,
+    visualArtifactCost = null,
+    hasOriginalImageData = false
+}) {
+    if (visibility?.visible !== true) return null;
+
+    if (
+        visibility.visibleSpatialResidual === true &&
+        visibility.visiblePositiveHalo !== true &&
+        spatialScore <= -FLAT_CLIPPED_METRIC_RISK_MIN_NEGATIVE_SPATIAL &&
+        visibility.positiveHaloLum <= FLAT_CLIPPED_METRIC_RISK_MAX_POSITIVE_HALO_LUM &&
+        nearBlackRatio >= FLAT_CLIPPED_METRIC_RISK_NEAR_BLACK_RATIO &&
+        (
+            !hasOriginalImageData ||
+            newlyClippedRatio >= FLAT_CLIPPED_METRIC_RISK_NEWLY_CLIPPED_RATIO
+        )
+    ) {
+        return 'flat-clipped-low-texture-spatial-correlation';
+    }
+
+    if (
+        visibility.visibleGradientResidual !== true &&
+        spatialScore >= POSITIVE_SPATIAL_BACKGROUND_COLLISION_MIN_SPATIAL &&
+        gradientScore < POSITIVE_SPATIAL_BACKGROUND_COLLISION_MAX_GRADIENT &&
+        visibility.positiveHaloLum <= POSITIVE_SPATIAL_BACKGROUND_COLLISION_MAX_POSITIVE_HALO_LUM &&
+        visualArtifactCost !== null &&
+        visualArtifactCost <= POSITIVE_SPATIAL_BACKGROUND_COLLISION_MAX_ARTIFACT_COST
+    ) {
+        return visibility.visiblePositiveHalo === true
+            ? 'positive-halo-background-collision'
+            : 'positive-spatial-background-collision';
+    }
+
+    if (
+        visibility.visiblePositiveHalo === true &&
+        visibility.visibleSpatialResidual !== true &&
+        visibility.visibleGradientResidual !== true &&
+        Math.abs(spatialScore) < WEAK_HALO_BACKGROUND_COLLISION_MAX_ABS_SPATIAL &&
+        gradientScore < WEAK_HALO_BACKGROUND_COLLISION_MAX_GRADIENT &&
+        visibility.positiveHaloLum <= WEAK_HALO_BACKGROUND_COLLISION_MAX_POSITIVE_HALO_LUM &&
+        nearBlackRatio < WEAK_HALO_BACKGROUND_COLLISION_MAX_NEAR_BLACK_RATIO &&
+        newlyClippedRatio <= WEAK_HALO_BACKGROUND_COLLISION_MAX_NEWLY_CLIPPED_RATIO &&
+        visualArtifactCost !== null &&
+        visualArtifactCost <= WEAK_HALO_BACKGROUND_COLLISION_MAX_ARTIFACT_COST
+    ) {
+        return 'weak-halo-background-collision';
+    }
+
+    if (
+        visibility.visiblePositiveHalo === true &&
+        visibility.visibleGradientResidual !== true &&
+        gradientScore >= STRUCTURED_EDGE_BACKGROUND_COLLISION_MIN_GRADIENT &&
+        nearBlackRatio < STRUCTURED_EDGE_BACKGROUND_COLLISION_MAX_NEAR_BLACK_RATIO &&
+        newlyClippedRatio <= STRUCTURED_EDGE_BACKGROUND_COLLISION_MAX_NEWLY_CLIPPED_RATIO &&
+        visualArtifactCost !== null &&
+        visualArtifactCost >= STRUCTURED_EDGE_BACKGROUND_COLLISION_MIN_ARTIFACT_COST
+    ) {
+        return 'structured-edge-background-collision';
+    }
+
+    return null;
 }
 
 function getReferenceRegion(position, imageData) {
