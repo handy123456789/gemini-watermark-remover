@@ -1864,12 +1864,12 @@ test('processWatermarkImageData should prefer strong bottom-right 48px evidence 
     );
 });
 
-test('processWatermarkImageData should keep the 20260618-2 no-target sample skipped', async (t) => {
+test('processWatermarkImageData should remove the 20260618-2 text-overlap watermark without treating it as no-target', async (t) => {
     const samplePath = path.resolve('D:/Project/sample-files/gemini-watermark/bug/20260618-2.png');
     try {
         await access(samplePath);
     } catch {
-        t.skip('external 20260618-2 no-target sample is not available');
+        t.skip('external 20260618-2 text-overlap sample is not available');
         return;
     }
 
@@ -1889,9 +1889,15 @@ test('processWatermarkImageData should keep the 20260618-2 no-target sample skip
         getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
     });
 
-    assert.equal(result.meta.applied, false);
-    assert.equal(result.meta.skipReason, 'no-watermark-detected');
-    assert.equal(result.meta.source, 'skipped');
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(result.meta.config, { logoSize: 96, marginRight: 64, marginBottom: 64 });
+    assert.deepEqual(result.meta.position, { x: 2240, y: 1632, width: 96, height: 96 });
+    assert.match(result.meta.source, /text-overlap/);
+    assert.equal(
+        result.meta.detection.residualVisibility?.visible,
+        false,
+        `expected text-overlap path to clear residual safely, detection=${JSON.stringify(result.meta.detection)}`
+    );
 });
 
 test('processWatermarkImageData should keep a 1024x1024 dark sample on the 48px large-margin anchor', async () => {

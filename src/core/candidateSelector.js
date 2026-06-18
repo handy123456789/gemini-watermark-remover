@@ -77,6 +77,13 @@ const STANDARD_TEXT_OVERLAP_MIN_GRADIENT_SCORE = 0.18;
 const STANDARD_TEXT_OVERLAP_MIN_IMPROVEMENT = 0.25;
 const STANDARD_TEXT_OVERLAP_MAX_RESIDUAL = 0.1;
 const STANDARD_TEXT_OVERLAP_MIN_GRADIENT_DROP = 0.1;
+const STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MIN_ORIGINAL_SPATIAL_SCORE = 0.12;
+const STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MIN_ORIGINAL_GRADIENT_SCORE = 0.06;
+const STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MIN_IMPROVEMENT = 0.08;
+const STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_SPATIAL_RESIDUAL = 0.08;
+const STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_GRADIENT_RESIDUAL = 0.08;
+const STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_NEAR_BLACK_INCREASE = 0.005;
+const STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_TEXTURE = 0.05;
 const STANDARD_VALIDATION_MIN_ORIGINAL_SPATIAL_SCORE = 0.05;
 const STANDARD_VALIDATION_MIN_ORIGINAL_GRADIENT_SCORE = 0.12;
 const STANDARD_CONSERVATIVE_CATALOG_PREFERRED_ALPHA_GAIN = 0.55;
@@ -605,6 +612,35 @@ function isWeakAlphaRescueCandidate(seed, trial) {
         trial.texturePenalty <= 0.25;
 }
 
+function isStandardTextOverlapWeakAlphaCandidate(seed, trial) {
+    if (!trial?.accepted || trial.alphaGain >= 1 || trial.hardReject === true) {
+        return false;
+    }
+    if (
+        seed?.config?.logoSize !== 96 ||
+        seed.config.marginRight !== 64 ||
+        seed.config.marginBottom !== 64
+    ) {
+        return false;
+    }
+
+    return trial.originalSpatialScore >= STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MIN_ORIGINAL_SPATIAL_SCORE &&
+        trial.originalGradientScore >= STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MIN_ORIGINAL_GRADIENT_SCORE &&
+        trial.improvement >= STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MIN_IMPROVEMENT &&
+        Math.abs(trial.processedSpatialScore) <= STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_SPATIAL_RESIDUAL &&
+        Math.max(0, trial.processedGradientScore) <= STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_GRADIENT_RESIDUAL &&
+        trial.nearBlackIncrease <= STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_NEAR_BLACK_INCREASE &&
+        trial.texturePenalty <= STANDARD_TEXT_OVERLAP_WEAK_ALPHA_MAX_TEXTURE;
+}
+
+function tagCandidateSource(candidate, tag) {
+    if (!candidate || String(candidate.source).includes(tag)) return candidate;
+    return {
+        ...candidate,
+        source: `${candidate.source}+${tag}`
+    };
+}
+
 function shouldPreferLargeMarginGradientClearance(currentBest, candidate) {
     if (!isCurrentLargeMarginCatalogCandidate(currentBest) || !isCurrentLargeMarginCatalogCandidate(candidate)) {
         return false;
@@ -693,6 +729,13 @@ function evaluateStandardTrialForSeed({
             fallbackTrial = trial;
         }
         if (alphaGain < 1) {
+            if (isStandardTextOverlapWeakAlphaCandidate(seed, trial)) {
+                bestWeakAlphaPriorityTrial = pickBetterCandidate(
+                    bestWeakAlphaPriorityTrial,
+                    tagCandidateSource(trial, 'text-overlap'),
+                    0.002
+                );
+            }
             if (
                 isWeakAlphaPrioritySeed(seed) &&
                 isCleanWeakAlphaPriorityCandidate(trial) &&
